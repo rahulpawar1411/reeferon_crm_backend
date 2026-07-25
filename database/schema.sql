@@ -51,3 +51,43 @@ CREATE TABLE IF NOT EXISTS leads (
     notes TEXT DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 4. Inward Temperature Logs Table
+CREATE TABLE IF NOT EXISTS inward_temp_logs (
+    inward_id INT AUTO_INCREMENT PRIMARY KEY,
+    inward_entry_date DATE NOT NULL,
+    inward_vehicle_no VARCHAR(50) NOT NULL,
+    inward_seal_no VARCHAR(100) DEFAULT NULL,
+    inward_vehicle_temp DECIMAL(5,2) DEFAULT NULL,
+    inward_material_temp DECIMAL(5,2) DEFAULT NULL,
+    inward_transporter_name VARCHAR(150) DEFAULT NULL,
+    inward_driver_name VARCHAR(150) DEFAULT NULL,
+    inward_driver_no VARCHAR(50) DEFAULT NULL,
+    inward_client_name VARCHAR(150) NOT NULL,
+    inward_dock_no VARCHAR(50) DEFAULT NULL,
+    inward_vehicle_reporting_time VARCHAR(50) DEFAULT NULL,
+    inward_unloading_start_time VARCHAR(50) DEFAULT NULL,
+    inward_unloading_duration_hours VARCHAR(50) DEFAULT NULL,
+    inward_unloading_duration_mins VARCHAR(50) DEFAULT NULL,
+    inward_unloading_end_time VARCHAR(50) DEFAULT NULL,
+    inward_pallets_in_qty INT DEFAULT 0,
+    inward_invoice_qty INT DEFAULT 0,
+    inward_received_qty INT DEFAULT 0,
+    inward_received_boxes_qty INT DEFAULT 0,
+    inward_short_received_boxes_qty INT DEFAULT 0,
+    inward_excess_received_boxes_qty INT DEFAULT 0,
+    inward_damage_received_boxes_qty INT DEFAULT 0,
+    inward_material_type VARCHAR(100) DEFAULT NULL,
+    inward_unloading_supervisor_name VARCHAR(150) DEFAULT NULL,
+    inward_remarks TEXT DEFAULT NULL,
+    inward_invoice_photos VARCHAR(255) DEFAULT NULL,
+    inward_pod_photo VARCHAR(255) DEFAULT NULL,
+    inward_vehicle_seal_photo VARCHAR(255) DEFAULT NULL,
+    inward_vehicle_temp_photo VARCHAR(255) DEFAULT NULL,
+    inward_material_temp_photo VARCHAR(255) DEFAULT NULL,
+    inward_vehicle_back_side_photo VARCHAR(255) DEFAULT NULL,
+    inward_vehicle_back_side_photo_with_material VARCHAR(255) DEFAULT NULL,
+    inward_count_sheet_photo VARCHAR(255) DEFAULT NULL,
+    inward_damage_boxes_photo TEXT DEFAULT NULL,
+    inward_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

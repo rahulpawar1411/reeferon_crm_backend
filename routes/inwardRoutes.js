@@ -32,13 +32,15 @@ const upload = multer({ storage });
 
 // Define multi-field uploads layout
 const uploadFields = upload.fields([
-  { name: 'invoice_photos', maxCount: 10 }, // Supports multiple invoice photo uploads
-  { name: 'pod_photo', maxCount: 1 },
-  { name: 'vehicle_seal_photo', maxCount: 1 },
-  { name: 'vehicle_temp_photo', maxCount: 1 },
-  { name: 'material_temp_photo', maxCount: 1 },
-  { name: 'vehicle_back_side_photo', maxCount: 1 },
-  { name: 'damage_boxes_photo', maxCount: 1 }
+  { name: 'inward_invoice_photos', maxCount: 1 }, 
+  { name: 'inward_pod_photo', maxCount: 1 },
+  { name: 'inward_vehicle_seal_photo', maxCount: 1 },
+  { name: 'inward_vehicle_temp_photo', maxCount: 1 },
+  { name: 'inward_material_temp_photo', maxCount: 1 },
+  { name: 'inward_vehicle_back_side_photo', maxCount: 1 },
+  { name: 'inward_vehicle_back_side_photo_with_material', maxCount: 1 },
+  { name: 'inward_count_sheet_photo', maxCount: 1 },
+  { name: 'inward_damage_boxes_photo', maxCount: 10 }
 ]);
 
 router.get('/', controller.getInwardLogs);

@@ -19,6 +19,9 @@ app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 // Serve Uploads directory statically (e.g., http://localhost:5000/uploads/...)
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+// Serve static built frontend files
+app.use(express.static(path.join(__dirname, '../frontend/dist')));
+
 // Routes
 const leadRoutes = require('./routes/leadRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
@@ -32,9 +35,17 @@ app.use('/api/temp-logs', tempRoutes);
 app.use('/api/chamber-temp', chamberTempRoutes);
 app.use('/api/inward-logs', inwardRoutes);
 
-// Root Health Check Route
-app.get('/', (req, res) => {
+// Health check endpoint
+app.get('/api/health', (req, res) => {
   res.json({ status: 'Online', message: 'ReeferON CRM API Backend running smoothly.' });
+});
+
+// Wildcard route to serve React app's index.html for any frontend routes
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ error: 'API route not found' });
+  }
+  res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
 });
 
 // Start Server
