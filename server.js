@@ -61,6 +61,7 @@ const inwardRoutes = require('./routes/inwardRoutes');
 const outwardRoutes = require('./routes/outwardRoutes');
 const operatorRoutes = require('./routes/operatorRoutes');
 const activityRoutes = require('./routes/activityRoutes');
+const permissionRoutes = require('./routes/permissionRoutes');
 
 // Mount Authentication Routes with Limiter on Login
 app.use('/api/auth', authRoutes);
@@ -75,6 +76,7 @@ app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'sub_admin'
 app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'sub_admin', 'do_operator']), outwardRoutes);
 app.use('/api/do-operators', verifyToken, requireRole(['super_admin']), operatorRoutes);
 app.use('/api/operator-activities', verifyToken, requireRole(['super_admin']), activityRoutes);
+app.use('/api/permission-requests', permissionRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

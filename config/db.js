@@ -57,10 +57,22 @@ async function testDbConnection() {
           action VARCHAR(50) NOT NULL,
           log_type VARCHAR(50) NOT NULL,
           description TEXT DEFAULT NULL,
+          permission_req INT DEFAULT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
       `);
       console.log('🌱 Verified do_operator_activities table is online.');
+
+      // Check and add permission_req dynamically if table already exists
+      const [columns] = await pool.query('SHOW COLUMNS FROM do_operator_activities');
+      const colNames = columns.map(c => c.Field);
+      if (!colNames.includes('permission_req')) {
+        await pool.query('ALTER TABLE do_operator_activities ADD COLUMN permission_req INT DEFAULT NULL');
+      }
+
+      // Clean up deprecated do_permission_requests table if it exists
+      await pool.query('DROP TABLE IF EXISTS do_permission_requests');
+      console.log('🌱 Dropped deprecated do_permission_requests table.');
     } catch (actErr) {
       console.warn('⚠️ Table do_operator_activities verification failed:', actErr.message);
     }

@@ -3,7 +3,7 @@ const db = require('../config/db');
 exports.getActivityLogs = async (req, res) => {
   try {
     const [rows] = await db.query(
-      'SELECT id, operator_email, action, log_type, description, created_at FROM do_operator_activities ORDER BY id DESC'
+      'SELECT id, operator_email, action, log_type, description, permission_req, created_at FROM do_operator_activities ORDER BY id DESC'
     );
     return res.json(rows);
   } catch (err) {

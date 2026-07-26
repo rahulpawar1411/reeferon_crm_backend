@@ -6,6 +6,7 @@
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { logActivity } = require('../utils/logger');
 
 // Expiration time: 24 hours
 const TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000; 
@@ -71,6 +72,7 @@ exports.login = async (req, res) => {
     // 2. If user not found in any table
     if (!user) {
       console.warn(`⚠️ Security Warning: Failed login attempt for unregistered email: ${cleanEmail}`);
+      await logActivity(cleanEmail, 'LOGIN_FAILED', 'SECURITY', `Failed login attempt for unregistered email`);
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password. Access Denied.'
@@ -81,6 +83,7 @@ exports.login = async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       console.warn(`⚠️ Security Warning: Incorrect password entered for: ${cleanEmail} (Resolved Role: ${resolvedRole})`);
+      await logActivity(cleanEmail, 'LOGIN_FAILED', 'SECURITY', `Incorrect password attempt for role: ${resolvedRole}`);
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password. Access Denied.'
@@ -91,7 +94,10 @@ exports.login = async (req, res) => {
     const tokenPayload = {
       id: user.id,
       email: user.email,
-      role: resolvedRole
+      role: resolvedRole,
+      full_name: user.full_name || user.fullName || user.username || user.name || null,
+      phone_no: user.phone_no || user.phone || null,
+      warehouse_name: user.warehouse_name || user.warehouse || null
     };
 
     const token = jwt.sign(
@@ -110,15 +116,12 @@ exports.login = async (req, res) => {
     });
 
     console.log(`🔐 Success: User ${cleanEmail} authenticated successfully. Role: ${resolvedRole}`);
+    await logActivity(cleanEmail, 'LOGIN', 'SECURITY', `Authenticated successfully as role: ${resolvedRole}`);
 
     return res.status(200).json({
       success: true,
       message: 'Logged in successfully.',
-      user: {
-        id: user.id,
-        email: user.email,
-        role: resolvedRole
-      }
+      user: tokenPayload
     });
   } catch (error) {
     console.error('❌ Login Error:', error);

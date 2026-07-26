@@ -5,6 +5,7 @@
 
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
+const { logActivity } = require('../utils/logger');
 
 // 1. GET ALL OPERATORS
 exports.getOperators = async (req, res) => {
@@ -43,6 +44,14 @@ exports.createOperator = async (req, res) => {
     await db.query(
       'INSERT INTO do_operators (email, password, full_name, phone_no, warehouse_name) VALUES (?, ?, ?, ?, ?)',
       [email, hashed, full_name, phone_no, warehouse_name]
+    );
+
+    // Log the permission change
+    await logActivity(
+      req.user?.email || 'super_admin',
+      'CREATE',
+      'PERMISSION',
+      `Registered operator profile: ${email} (Warehouse: ${warehouse_name})`
     );
 
     return res.status(201).json({ message: 'Data operator created successfully.' });
@@ -86,6 +95,14 @@ exports.updateOperator = async (req, res) => {
       );
     }
 
+    // Log the permission change
+    await logActivity(
+      req.user?.email || 'super_admin',
+      'UPDATE',
+      'PERMISSION',
+      `Updated operator profile: ${email} (Warehouse: ${warehouse_name})`
+    );
+
     return res.json({ message: 'Data operator updated successfully.' });
   } catch (err) {
     console.error('Error updating operator:', err);
@@ -97,7 +114,22 @@ exports.updateOperator = async (req, res) => {
 exports.deleteOperator = async (req, res) => {
   try {
     const { id } = req.params;
+    
+    // Fetch operator details before deletion for audit logging
+    const [opRows] = await db.query('SELECT email, warehouse_name FROM do_operators WHERE id = ? LIMIT 1', [id]);
+    const opEmail = opRows.length > 0 ? opRows[0].email : `ID ${id}`;
+    const opWarehouse = opRows.length > 0 ? opRows[0].warehouse_name : 'Unknown';
+
     await db.query('DELETE FROM do_operators WHERE id = ?', [id]);
+
+    // Log the permission revocation
+    await logActivity(
+      req.user?.email || 'super_admin',
+      'DELETE',
+      'PERMISSION',
+      `Revoked workspace access for operator: ${opEmail} (Warehouse: ${opWarehouse})`
+    );
+
     return res.json({ message: 'Data operator deleted successfully.' });
   } catch (err) {
     console.error('Error deleting operator:', err);

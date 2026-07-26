@@ -225,6 +225,14 @@ exports.deleteInwardLog = async (req, res) => {
     cleanupFile(record.inward_vehicle_back_side_photo_with_material);
     cleanupFile(record.inward_count_sheet_photo);
 
+    // Log Operator Activity
+    await logActivity(
+      req.user ? req.user.email : 'unknown',
+      'DELETE',
+      'Inward Log',
+      `Deleted Inward record ID #${id} for vehicle ${record.inward_vehicle_no} and client ${record.inward_client_name}`
+    );
+
     return res.json({ message: 'Record deleted and related files cleaned up.' });
   } catch (err) {
     console.error('Error deleting inward log:', err);
