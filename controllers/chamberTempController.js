@@ -67,15 +67,21 @@ exports.getChamberLogs = async (req, res) => {
   const { search } = req.query;
 
   try {
-    let query = `SELECT id, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at FROM daily_chamber_temp_logs ORDER BY entry_date DESC, id DESC`;
+    let conditions = [];
     let params = [];
 
-    if (search) {
-      query = `SELECT id, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at FROM daily_chamber_temp_logs 
-               WHERE client_name LIKE ? OR chamber_name LIKE ? OR monitor_supervisor_name LIKE ? OR inspection_time LIKE ?
-               ORDER BY entry_date DESC, id DESC`;
-      params = [`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`];
+    if (req.user && req.user.role === 'do_operator' && req.user.warehouse_name) {
+      conditions.push('(warehouse_name = ? OR warehouse_name IS NULL)');
+      params.push(req.user.warehouse_name);
     }
+
+    if (search) {
+      conditions.push('(client_name LIKE ? OR chamber_name LIKE ? OR monitor_supervisor_name LIKE ? OR inspection_time LIKE ?)');
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const query = `SELECT id, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC`;
 
     const [rows] = await db.query(query, params);
     return res.json(rows);
@@ -148,8 +154,8 @@ exports.addChamberLog = async (req, res) => {
     const localTimestamp = formatDateTime(new Date());
     const query = `
       INSERT INTO daily_chamber_temp_logs 
-      (entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, created_at, updated_at, warehouse_name, operator_email)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const values = [
       entry_date, 
@@ -162,7 +168,9 @@ exports.addChamberLog = async (req, res) => {
       photo_capture_time,
       time_variance_minutes,
       localTimestamp,
-      localTimestamp
+      localTimestamp,
+      req.user ? req.user.warehouse_name : null,
+      req.user ? req.user.email : null
     ];
 
     const [result] = await db.query(query, values);

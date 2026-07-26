@@ -24,7 +24,22 @@ function formatDateTime(date) {
 exports.getOutwardLogs = async (req, res) => {
   try {
     const { search } = req.query;
-    let query = `
+    let conditions = [];
+    let params = [];
+
+    if (req.user && req.user.role === 'do_operator' && req.user.warehouse_name) {
+      conditions.push('(warehouse_name = ? OR warehouse_name IS NULL)');
+      params.push(req.user.warehouse_name);
+    }
+
+    if (search) {
+      conditions.push('(outward_vehicle_no LIKE ? OR outward_client_name LIKE ? OR outward_transporter_name LIKE ? OR outward_driver_name LIKE ?)');
+      const pattern = `%${search}%`;
+      params.push(pattern, pattern, pattern, pattern);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const query = `
       SELECT outward_id, DATE_FORMAT(outward_entry_date, '%Y-%m-%d') as outward_entry_date, outward_vehicle_no, outward_seal_no, 
              outward_vehicle_temp, outward_material_temp, outward_transporter_name, outward_driver_name, outward_driver_no, 
              outward_client_name, outward_dock_no, outward_vehicle_reporting_time, outward_loading_start_time,
@@ -33,29 +48,11 @@ exports.getOutwardLogs = async (req, res) => {
              outward_short_received_boxes_qty, outward_excess_received_boxes_qty, outward_damage_received_boxes_qty, 
              outward_material_type, outward_loading_supervisor_name, outward_remarks, outward_invoice_photos, outward_pod_photo, 
              outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_material_temp_photo, outward_vehicle_back_side_photo, 
-             outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, outward_created_at, outward_updated_at 
+             outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, outward_created_at, outward_updated_at, warehouse_name, operator_email
       FROM outward_temp_logs 
+      ${whereClause}
       ORDER BY outward_entry_date DESC, outward_id DESC
     `;
-    let params = [];
-
-    if (search) {
-      query = `
-        SELECT outward_id, DATE_FORMAT(outward_entry_date, '%Y-%m-%d') as outward_entry_date, outward_vehicle_no, outward_seal_no, 
-               outward_vehicle_temp, outward_material_temp, outward_transporter_name, outward_driver_name, outward_driver_no, 
-               outward_client_name, outward_dock_no, outward_vehicle_reporting_time, outward_loading_start_time,
-               outward_loading_duration_hours, outward_loading_duration_mins, outward_loading_end_time, 
-               outward_pallets_in_qty, outward_invoice_qty, outward_received_qty, outward_received_boxes_qty, 
-               outward_short_received_boxes_qty, outward_excess_received_boxes_qty, outward_damage_received_boxes_qty, 
-               outward_material_type, outward_loading_supervisor_name, outward_remarks, outward_invoice_photos, outward_pod_photo, 
-               outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_material_temp_photo, outward_vehicle_back_side_photo, 
-               outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, outward_created_at, outward_updated_at 
-        FROM outward_temp_logs 
-        WHERE outward_vehicle_no LIKE ? OR outward_client_name LIKE ? OR outward_transporter_name LIKE ? OR outward_driver_name LIKE ?
-        ORDER BY outward_entry_date DESC, outward_id DESC
-      `;
-      params = [`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`];
-    }
 
     const [rows] = await db.query(query, params);
     return res.json(rows);
@@ -118,8 +115,8 @@ exports.addOutwardLog = async (req, res) => {
         outward_damage_received_boxes_qty, outward_material_type, outward_loading_supervisor_name, outward_remarks, 
         outward_invoice_photos, outward_pod_photo, outward_vehicle_seal_photo, outward_vehicle_temp_photo, 
         outward_material_temp_photo, outward_vehicle_back_side_photo, outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo,
-        outward_created_at, outward_updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        outward_created_at, outward_updated_at, warehouse_name, operator_email
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const values = [
@@ -158,7 +155,9 @@ exports.addOutwardLog = async (req, res) => {
       outward_count_sheet_photo,
       outward_damage_boxes_photo,
       localTimestamp,
-      localTimestamp
+      localTimestamp,
+      req.user ? req.user.warehouse_name : null,
+      req.user ? req.user.email : null
     ];
 
     const [result] = await db.query(query, values);

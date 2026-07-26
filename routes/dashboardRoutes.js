@@ -8,5 +8,6 @@ const dashboardController = require('../controllers/dashboardController');
 
 // GET /api/dashboard/stats - Fetch aggregated stats
 router.get('/stats', dashboardController.getDashboardStats);
+router.get('/', dashboardController.getDashboardStats);
 
 module.exports = router;

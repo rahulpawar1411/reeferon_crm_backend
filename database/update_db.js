@@ -140,6 +140,21 @@ async function run() {
     `);
     console.log("✅ sub_admins table verified/created successfully.");
 
+    // Alter table to add full_name and phone_no columns if they don't exist
+    try {
+      await db.query("ALTER TABLE sub_admins ADD COLUMN full_name VARCHAR(150) DEFAULT NULL");
+      console.log("Added full_name column to sub_admins table.");
+    } catch (e) {
+      // Ignore if column already exists
+    }
+
+    try {
+      await db.query("ALTER TABLE sub_admins ADD COLUMN phone_no VARCHAR(20) DEFAULT NULL");
+      console.log("Added phone_no column to sub_admins table.");
+    } catch (e) {
+      // Ignore if column already exists
+    }
+
     // 4. Seed initial default users if tables are empty
     const salt = await bcrypt.genSalt(10);
     

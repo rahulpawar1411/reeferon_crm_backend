@@ -48,6 +48,56 @@ async function testDbConnection() {
       console.warn('⚠️ Table do_operators verification skipped:', tblErr.message);
     }
 
+    // Auto migration: create daily_temp_logs table if not exists
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS daily_temp_logs (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          entry_type VARCHAR(50) NOT NULL,
+          container_number VARCHAR(50) NOT NULL,
+          client_name VARCHAR(150) NOT NULL,
+          cargo_type VARCHAR(100) DEFAULT 'Cold Cargo',
+          target_temp DECIMAL(5,2) NOT NULL,
+          actual_temp DECIMAL(5,2) NOT NULL,
+          temp_variance DECIMAL(5,2) DEFAULT 0.0,
+          status VARCHAR(50) DEFAULT 'Normal',
+          location_dock VARCHAR(100) DEFAULT 'Bay 1',
+          driver_name VARCHAR(100) DEFAULT NULL,
+          driver_phone VARCHAR(50) DEFAULT NULL,
+          seal_number VARCHAR(100) DEFAULT NULL,
+          genset_status VARCHAR(50) DEFAULT 'Running',
+          fuel_level VARCHAR(50) DEFAULT '100%',
+          operator_name VARCHAR(150) DEFAULT NULL,
+          remarks TEXT DEFAULT NULL,
+          warehouse_name VARCHAR(150) DEFAULT NULL,
+          operator_email VARCHAR(150) DEFAULT NULL,
+          recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      console.log('🌱 Verified daily_temp_logs table is online.');
+    } catch (tblErr) {
+      console.warn('⚠️ Table daily_temp_logs creation failed:', tblErr.message);
+    }
+
+    // Auto migration: add warehouse_name column to log tables if they don't exist
+    const logTables = ['daily_chamber_temp_logs', 'inward_temp_logs', 'outward_temp_logs', 'daily_temp_logs'];
+    for (const table of logTables) {
+      try {
+        const [columns] = await pool.query(`SHOW COLUMNS FROM ${table}`);
+        const colNames = columns.map(c => c.Field);
+        if (!colNames.includes('warehouse_name')) {
+          await pool.query(`ALTER TABLE ${table} ADD COLUMN warehouse_name VARCHAR(150) DEFAULT NULL`);
+          console.log(`🌱 Added column warehouse_name to ${table}.`);
+        }
+        if (!colNames.includes('operator_email')) {
+          await pool.query(`ALTER TABLE ${table} ADD COLUMN operator_email VARCHAR(150) DEFAULT NULL`);
+          console.log(`🌱 Added column operator_email to ${table}.`);
+        }
+      } catch (tblErr) {
+        console.warn(`⚠️ Table ${table} verification skipped or failed:`, tblErr.message);
+      }
+    }
+
     // Auto migration: create do_operator_activities table if not exists
     try {
       await pool.query(`

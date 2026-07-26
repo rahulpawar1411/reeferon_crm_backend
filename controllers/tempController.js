@@ -30,6 +30,11 @@ exports.getAllTempLogs = async (req, res) => {
       params.push(pattern, pattern, pattern, pattern, pattern);
     }
 
+    if (req.user && req.user.role === 'do_operator' && req.user.warehouse_name) {
+      sql += ' AND (warehouse_name = ? OR warehouse_name IS NULL)';
+      params.push(req.user.warehouse_name);
+    }
+
     sql += ' ORDER BY recorded_at DESC';
 
     const [rows] = await db.query(sql, params);
@@ -93,8 +98,8 @@ exports.createTempLog = async (req, res) => {
 
     const sql = `
       INSERT INTO daily_temp_logs 
-      (entry_type, container_number, client_name, cargo_type, target_temp, actual_temp, temp_variance, status, location_dock, driver_name, driver_phone, seal_number, genset_status, fuel_level, operator_name, remarks)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (entry_type, container_number, client_name, cargo_type, target_temp, actual_temp, temp_variance, status, location_dock, driver_name, driver_phone, seal_number, genset_status, fuel_level, operator_name, remarks, warehouse_name, operator_email)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const params = [
@@ -113,7 +118,9 @@ exports.createTempLog = async (req, res) => {
       genset_status || 'Running',
       fuel_level || '100%',
       operator_name || 'Data Operator DO',
-      remarks || ''
+      remarks || '',
+      req.user ? req.user.warehouse_name : null,
+      req.user ? req.user.email : null
     ];
 
     const [result] = await db.query(sql, params);

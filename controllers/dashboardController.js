@@ -22,6 +22,10 @@ exports.getDashboardStats = async (req, res) => {
     // 3. Calculate total pipeline value (INR)
     const [valueRows] = await db.query('SELECT SUM(value) as totalValue FROM leads');
 
+    // 4. Sub admins and operators count
+    const [subRows] = await db.query('SELECT COUNT(*) as totalSubAdmins FROM sub_admins');
+    const [operatorRows] = await db.query('SELECT COUNT(*) as totalOperators FROM do_operators');
+
     return res.status(200).json({
       success: true,
       stats: {
@@ -29,7 +33,9 @@ exports.getDashboardStats = async (req, res) => {
         newLeads: newRows[0].newLeads || 0,
         inProgressLeads: inProgressRows[0].inProgressLeads || 0,
         wonLeads: wonRows[0].wonLeads || 0,
-        totalValue: parseFloat(valueRows[0].totalValue || 0)
+        totalValue: parseFloat(valueRows[0].totalValue || 0),
+        totalSubAdmins: subRows[0].totalSubAdmins || 0,
+        totalOperators: operatorRows[0].totalOperators || 0
       }
     });
   } catch (error) {

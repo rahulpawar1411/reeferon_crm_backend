@@ -60,6 +60,7 @@ const chamberTempRoutes = require('./routes/chamberTempRoutes');
 const inwardRoutes = require('./routes/inwardRoutes');
 const outwardRoutes = require('./routes/outwardRoutes');
 const operatorRoutes = require('./routes/operatorRoutes');
+const subAdminRoutes = require('./routes/subAdminRoutes');
 const activityRoutes = require('./routes/activityRoutes');
 const permissionRoutes = require('./routes/permissionRoutes');
 
@@ -75,6 +76,7 @@ app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'sub_admin
 app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'sub_admin', 'do_operator']), inwardRoutes);
 app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'sub_admin', 'do_operator']), outwardRoutes);
 app.use('/api/do-operators', verifyToken, requireRole(['super_admin']), operatorRoutes);
+app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), subAdminRoutes);
 app.use('/api/operator-activities', verifyToken, requireRole(['super_admin']), activityRoutes);
 app.use('/api/permission-requests', permissionRoutes);
 
