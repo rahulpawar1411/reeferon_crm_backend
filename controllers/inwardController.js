@@ -6,6 +6,7 @@
 const db = require('../config/db');
 const fs = require('fs');
 const path = require('path');
+const { logActivity } = require('../utils/logger');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -22,6 +23,7 @@ function formatDateTime(date) {
 // 1. GET ALL INWARD LOGS (With optional search query)
 exports.getInwardLogs = async (req, res) => {
   try {
+    const { search } = req.query;
     let query = `
       SELECT inward_id, DATE_FORMAT(inward_entry_date, '%Y-%m-%d') as inward_entry_date, inward_vehicle_no, inward_seal_no, 
              inward_vehicle_temp, inward_material_temp, inward_transporter_name, inward_driver_name, inward_driver_no, 
@@ -31,7 +33,7 @@ exports.getInwardLogs = async (req, res) => {
              inward_short_received_boxes_qty, inward_excess_received_boxes_qty, inward_damage_received_boxes_qty, 
              inward_material_type, inward_unloading_supervisor_name, inward_remarks, inward_invoice_photos, inward_pod_photo, 
              inward_vehicle_seal_photo, inward_vehicle_temp_photo, inward_material_temp_photo, inward_vehicle_back_side_photo, 
-             inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo, inward_created_at 
+             inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo, inward_created_at, inward_updated_at 
       FROM inward_temp_logs 
       ORDER BY inward_entry_date DESC, inward_id DESC
     `;
@@ -47,7 +49,7 @@ exports.getInwardLogs = async (req, res) => {
                inward_short_received_boxes_qty, inward_excess_received_boxes_qty, inward_damage_received_boxes_qty, 
                inward_material_type, inward_unloading_supervisor_name, inward_remarks, inward_invoice_photos, inward_pod_photo, 
                inward_vehicle_seal_photo, inward_vehicle_temp_photo, inward_material_temp_photo, inward_vehicle_back_side_photo, 
-               inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo, inward_created_at 
+               inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo, inward_created_at, inward_updated_at 
         FROM inward_temp_logs 
         WHERE inward_vehicle_no LIKE ? OR inward_client_name LIKE ? OR inward_transporter_name LIKE ? OR inward_driver_name LIKE ?
         ORDER BY inward_entry_date DESC, inward_id DESC
@@ -94,6 +96,19 @@ exports.addInwardLog = async (req, res) => {
       return res.status(400).json({ error: 'Date, Vehicle No, and Client Name are required.' });
     }
 
+    const localTimestamp = formatDateTime(new Date());
+
+    let startWithDate = data.inward_unloading_start_time || null;
+    if (data.inward_entry_date && data.inward_unloading_start_time) {
+      const dateParts = data.inward_entry_date.split('-');
+      if (dateParts.length === 3) {
+        const [yyyy, mm, dd] = dateParts;
+        if (!data.inward_unloading_start_time.includes('-')) {
+          startWithDate = `${dd}-${mm}-${yyyy} ${data.inward_unloading_start_time}`;
+        }
+      }
+    }
+
     const query = `
       INSERT INTO inward_temp_logs (
         inward_entry_date, inward_vehicle_no, inward_seal_no, inward_vehicle_temp, inward_material_temp, inward_transporter_name, 
@@ -102,8 +117,9 @@ exports.addInwardLog = async (req, res) => {
         inward_received_qty, inward_received_boxes_qty, inward_short_received_boxes_qty, inward_excess_received_boxes_qty, 
         inward_damage_received_boxes_qty, inward_material_type, inward_unloading_supervisor_name, inward_remarks, 
         inward_invoice_photos, inward_pod_photo, inward_vehicle_seal_photo, inward_vehicle_temp_photo, 
-        inward_material_temp_photo, inward_vehicle_back_side_photo, inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        inward_material_temp_photo, inward_vehicle_back_side_photo, inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo,
+        inward_created_at, inward_updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const values = [
@@ -118,7 +134,7 @@ exports.addInwardLog = async (req, res) => {
       data.inward_client_name,
       data.inward_dock_no || null,
       data.inward_vehicle_reporting_time || null,
-      data.inward_unloading_start_time || null,
+      startWithDate,
       data.inward_unloading_duration_hours || null,
       data.inward_unloading_duration_mins || null,
       data.inward_unloading_end_time || null,
@@ -140,10 +156,21 @@ exports.addInwardLog = async (req, res) => {
       inward_vehicle_back_side_photo,
       inward_vehicle_back_side_photo_with_material,
       inward_count_sheet_photo,
-      inward_damage_boxes_photo
+      inward_damage_boxes_photo,
+      localTimestamp,
+      localTimestamp
     ];
 
     const [result] = await db.query(query, values);
+    
+    // Log Operator Activity
+    await logActivity(
+      req.user ? req.user.email : 'unknown',
+      'CREATE',
+      'Inward Log',
+      `Created Inward record for vehicle ${data.inward_vehicle_no} and client ${data.inward_client_name}`
+    );
+
     return res.status(201).json({ id: result.insertId, message: 'Inward temperature record saved successfully.' });
   } catch (err) {
     console.error('Error creating inward log:', err);
@@ -202,5 +229,148 @@ exports.deleteInwardLog = async (req, res) => {
   } catch (err) {
     console.error('Error deleting inward log:', err);
     return res.status(500).json({ error: 'Failed to delete record.' });
+  }
+};
+
+// 4. UPDATE AN EXISTING INWARD LOG
+exports.updateInwardLog = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const data = req.body;
+    const files = req.files || {};
+
+    // Get existing record to handle files merging
+    const [existing] = await db.query('SELECT * FROM inward_temp_logs WHERE inward_id = ?', [id]);
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Record not found.' });
+    }
+    const current = existing[0];
+
+    // Single photos merging
+    const getPhotoPath = (fieldName, fallbackValue) => {
+      return files[fieldName] ? `uploads/inward_images/${files[fieldName][0].filename}` : fallbackValue;
+    };
+
+    const inward_invoice_photos = getPhotoPath('inward_invoice_photos', current.inward_invoice_photos);
+    const inward_pod_photo = getPhotoPath('inward_pod_photo', current.inward_pod_photo);
+    const inward_vehicle_seal_photo = getPhotoPath('inward_vehicle_seal_photo', current.inward_vehicle_seal_photo);
+    const inward_vehicle_temp_photo = getPhotoPath('inward_vehicle_temp_photo', current.inward_vehicle_temp_photo);
+    const inward_material_temp_photo = getPhotoPath('inward_material_temp_photo', current.inward_material_temp_photo);
+    const inward_vehicle_back_side_photo = getPhotoPath('inward_vehicle_back_side_photo', current.inward_vehicle_back_side_photo);
+    const inward_vehicle_back_side_photo_with_material = getPhotoPath('inward_vehicle_back_side_photo_with_material', current.inward_vehicle_back_side_photo_with_material);
+    const inward_count_sheet_photo = getPhotoPath('inward_count_sheet_photo', current.inward_count_sheet_photo);
+
+    let inward_damage_boxes_photo = current.inward_damage_boxes_photo;
+    if (files.inward_damage_boxes_photo) {
+      const damage_photos_list = files.inward_damage_boxes_photo.map(f => `uploads/inward_images/${f.filename}`);
+      inward_damage_boxes_photo = damage_photos_list.join(',');
+    }
+
+    const localTimestamp = formatDateTime(new Date());
+    const query = `
+      UPDATE inward_temp_logs SET
+        inward_entry_date = COALESCE(?, inward_entry_date),
+        inward_vehicle_no = COALESCE(?, inward_vehicle_no),
+        inward_seal_no = ?,
+        inward_vehicle_temp = ?,
+        inward_material_temp = ?,
+        inward_transporter_name = ?,
+        inward_driver_name = ?,
+        inward_driver_no = ?,
+        inward_client_name = COALESCE(?, inward_client_name),
+        inward_dock_no = ?,
+        inward_vehicle_reporting_time = ?,
+        inward_unloading_start_time = ?,
+        inward_unloading_duration_hours = ?,
+        inward_unloading_duration_mins = ?,
+        inward_unloading_end_time = ?,
+        inward_pallets_in_qty = ?,
+        inward_invoice_qty = ?,
+        inward_received_qty = ?,
+        inward_received_boxes_qty = ?,
+        inward_short_received_boxes_qty = ?,
+        inward_excess_received_boxes_qty = ?,
+        inward_damage_received_boxes_qty = ?,
+        inward_material_type = ?,
+        inward_unloading_supervisor_name = ?,
+        inward_remarks = ?,
+        inward_invoice_photos = ?,
+        inward_pod_photo = ?,
+        inward_vehicle_seal_photo = ?,
+        inward_vehicle_temp_photo = ?,
+        inward_material_temp_photo = ?,
+        inward_vehicle_back_side_photo = ?,
+        inward_vehicle_back_side_photo_with_material = ?,
+        inward_count_sheet_photo = ?,
+        inward_damage_boxes_photo = ?,
+        inward_updated_at = ?
+      WHERE inward_id = ?
+    `;
+
+    let startWithDate = data.inward_unloading_start_time !== undefined ? data.inward_unloading_start_time : current.inward_unloading_start_time;
+    if (startWithDate && !startWithDate.includes('-')) {
+      const entryDate = data.inward_entry_date || current.inward_entry_date;
+      if (entryDate) {
+        const dateParts = entryDate.split('-');
+        if (dateParts.length === 3) {
+          const [yyyy, mm, dd] = dateParts;
+          startWithDate = `${dd}-${mm}-${yyyy} ${startWithDate}`;
+        }
+      }
+    }
+
+    const values = [
+      data.inward_entry_date,
+      data.inward_vehicle_no,
+      data.inward_seal_no !== undefined ? data.inward_seal_no : current.inward_seal_no,
+      data.inward_vehicle_temp !== undefined && data.inward_vehicle_temp !== '' ? parseFloat(data.inward_vehicle_temp) : current.inward_vehicle_temp,
+      data.inward_material_temp !== undefined && data.inward_material_temp !== '' ? parseFloat(data.inward_material_temp) : current.inward_material_temp,
+      data.inward_transporter_name !== undefined ? data.inward_transporter_name : current.inward_transporter_name,
+      data.inward_driver_name !== undefined ? data.inward_driver_name : current.inward_driver_name,
+      data.inward_driver_no !== undefined ? data.inward_driver_no : current.inward_driver_no,
+      data.inward_client_name,
+      data.inward_dock_no !== undefined ? data.inward_dock_no : current.inward_dock_no,
+      data.inward_vehicle_reporting_time !== undefined ? data.inward_vehicle_reporting_time : current.inward_vehicle_reporting_time,
+      startWithDate,
+      data.inward_unloading_duration_hours !== undefined ? data.inward_unloading_duration_hours : current.inward_unloading_duration_hours,
+      data.inward_unloading_duration_mins !== undefined ? data.inward_unloading_duration_mins : current.inward_unloading_duration_mins,
+      data.inward_unloading_end_time !== undefined ? data.inward_unloading_end_time : current.inward_unloading_end_time,
+      data.inward_pallets_in_qty !== undefined && data.inward_pallets_in_qty !== '' ? parseInt(data.inward_pallets_in_qty) : current.inward_pallets_in_qty,
+      data.inward_invoice_qty !== undefined && data.inward_invoice_qty !== '' ? parseInt(data.inward_invoice_qty) : current.inward_invoice_qty,
+      data.inward_received_qty !== undefined && data.inward_received_qty !== '' ? parseInt(data.inward_received_qty) : current.inward_received_qty,
+      data.inward_received_boxes_qty !== undefined && data.inward_received_boxes_qty !== '' ? parseInt(data.inward_received_boxes_qty) : current.inward_received_boxes_qty,
+      data.inward_short_received_boxes_qty !== undefined && data.inward_short_received_boxes_qty !== '' ? parseInt(data.inward_short_received_boxes_qty) : current.inward_short_received_boxes_qty,
+      data.inward_excess_received_boxes_qty !== undefined && data.inward_excess_received_boxes_qty !== '' ? parseInt(data.inward_excess_received_boxes_qty) : current.inward_excess_received_boxes_qty,
+      data.inward_damage_received_boxes_qty !== undefined && data.inward_damage_received_boxes_qty !== '' ? parseInt(data.inward_damage_received_boxes_qty) : current.inward_damage_received_boxes_qty,
+      data.inward_material_type !== undefined ? data.inward_material_type : current.inward_material_type,
+      data.inward_unloading_supervisor_name !== undefined ? data.inward_unloading_supervisor_name : current.inward_unloading_supervisor_name,
+      data.inward_remarks !== undefined ? data.inward_remarks : current.inward_remarks,
+      inward_invoice_photos,
+      inward_pod_photo,
+      inward_vehicle_seal_photo,
+      inward_vehicle_temp_photo,
+      inward_material_temp_photo,
+      inward_vehicle_back_side_photo,
+      inward_vehicle_back_side_photo_with_material,
+      inward_count_sheet_photo,
+      inward_damage_boxes_photo,
+      localTimestamp,
+      id
+    ];
+
+    await db.query(query, values);
+    
+    // Log Operator Activity
+    await logActivity(
+      req.user ? req.user.email : 'unknown',
+      'UPDATE',
+      'Inward Log',
+      `Updated Inward record ID #${id} for vehicle ${data.inward_vehicle_no || current.inward_vehicle_no}`
+    );
+
+    return res.json({ message: 'Inward temperature record updated successfully.' });
+  } catch (err) {
+    console.error('Error updating inward log:', err);
+    return res.status(500).json({ error: 'Failed to update inward log.' });
   }
 };

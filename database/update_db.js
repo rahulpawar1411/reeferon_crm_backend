@@ -1,45 +1,95 @@
 const db = require('../config/db');
+const bcrypt = require('bcryptjs');
 
 async function run() {
   try {
-    // 1. Create table if not exists with all required fields
+    // 1. Create inward table if not exists with all required fields
     await db.query(`
       CREATE TABLE IF NOT EXISTS inward_temp_logs (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        entry_date DATE NOT NULL,
-        vehicle_no VARCHAR(50) NOT NULL,
-        seal_no VARCHAR(100) DEFAULT NULL,
-        vehicle_temp DECIMAL(4,1) DEFAULT NULL,
-        material_temp DECIMAL(4,1) DEFAULT NULL,
-        transporter_name VARCHAR(150) DEFAULT NULL,
-        driver_name VARCHAR(100) DEFAULT NULL,
-        driver_no VARCHAR(50) DEFAULT NULL,
-        client_name VARCHAR(150) NOT NULL,
-        dock_no VARCHAR(50) DEFAULT NULL,
-        vehicle_reporting_time VARCHAR(50) DEFAULT NULL,
-        unloading_start_time VARCHAR(50) DEFAULT NULL,
-        unloading_end_time VARCHAR(50) DEFAULT NULL,
-        pallets_in_qty INT DEFAULT 0,
-        invoice_qty INT DEFAULT 0,
-        received_qty INT DEFAULT 0,
-        received_boxes_qty INT DEFAULT 0,
-        short_received_boxes_qty INT DEFAULT 0,
-        excess_received_boxes_qty INT DEFAULT 0,
-        damage_received_boxes_qty INT DEFAULT 0,
-        material_type VARCHAR(100) DEFAULT NULL,
-        unloading_supervisor_name VARCHAR(150) DEFAULT NULL,
-        remarks TEXT DEFAULT NULL,
-        invoice_photos TEXT DEFAULT NULL,
-        pod_photo VARCHAR(255) DEFAULT NULL,
-        vehicle_seal_photo VARCHAR(255) DEFAULT NULL,
-        vehicle_temp_photo VARCHAR(255) DEFAULT NULL,
-        material_temp_photo VARCHAR(255) DEFAULT NULL,
-        vehicle_back_side_photo VARCHAR(255) DEFAULT NULL,
-        damage_boxes_photo VARCHAR(255) DEFAULT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        inward_id INT AUTO_INCREMENT PRIMARY KEY,
+        inward_entry_date DATE NOT NULL,
+        inward_vehicle_no VARCHAR(50) NOT NULL,
+        inward_seal_no VARCHAR(100) DEFAULT NULL,
+        inward_vehicle_temp DECIMAL(5,2) DEFAULT NULL,
+        inward_material_temp DECIMAL(5,2) DEFAULT NULL,
+        inward_transporter_name VARCHAR(150) DEFAULT NULL,
+        inward_driver_name VARCHAR(150) DEFAULT NULL,
+        inward_driver_no VARCHAR(50) DEFAULT NULL,
+        inward_client_name VARCHAR(150) NOT NULL,
+        inward_dock_no VARCHAR(50) DEFAULT NULL,
+        inward_vehicle_reporting_time VARCHAR(50) DEFAULT NULL,
+        inward_unloading_start_time VARCHAR(50) DEFAULT NULL,
+        inward_unloading_duration_hours VARCHAR(50) DEFAULT NULL,
+        inward_unloading_duration_mins VARCHAR(50) DEFAULT NULL,
+        inward_unloading_end_time VARCHAR(50) DEFAULT NULL,
+        inward_pallets_in_qty INT DEFAULT 0,
+        inward_invoice_qty INT DEFAULT 0,
+        inward_received_qty INT DEFAULT 0,
+        inward_received_boxes_qty INT DEFAULT 0,
+        inward_short_received_boxes_qty INT DEFAULT 0,
+        inward_excess_received_boxes_qty INT DEFAULT 0,
+        inward_damage_received_boxes_qty INT DEFAULT 0,
+        inward_material_type VARCHAR(100) DEFAULT NULL,
+        inward_unloading_supervisor_name VARCHAR(150) DEFAULT NULL,
+        inward_remarks TEXT DEFAULT NULL,
+        inward_invoice_photos VARCHAR(255) DEFAULT NULL,
+        inward_pod_photo VARCHAR(255) DEFAULT NULL,
+        inward_vehicle_seal_photo VARCHAR(255) DEFAULT NULL,
+        inward_vehicle_temp_photo VARCHAR(255) DEFAULT NULL,
+        inward_material_temp_photo VARCHAR(255) DEFAULT NULL,
+        inward_vehicle_back_side_photo VARCHAR(255) DEFAULT NULL,
+        inward_vehicle_back_side_photo_with_material VARCHAR(255) DEFAULT NULL,
+        inward_count_sheet_photo VARCHAR(255) DEFAULT NULL,
+        inward_damage_boxes_photo TEXT DEFAULT NULL,
+        inward_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        inward_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
     console.log("✅ inward_temp_logs table verified/created successfully.");
+
+    // Create outward table if not exists with all required fields (loading, outward prefix)
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS outward_temp_logs (
+        outward_id INT AUTO_INCREMENT PRIMARY KEY,
+        outward_entry_date DATE NOT NULL,
+        outward_vehicle_no VARCHAR(50) NOT NULL,
+        outward_seal_no VARCHAR(100) DEFAULT NULL,
+        outward_vehicle_temp DECIMAL(5,2) DEFAULT NULL,
+        outward_material_temp DECIMAL(5,2) DEFAULT NULL,
+        outward_transporter_name VARCHAR(150) DEFAULT NULL,
+        outward_driver_name VARCHAR(150) DEFAULT NULL,
+        outward_driver_no VARCHAR(50) DEFAULT NULL,
+        outward_client_name VARCHAR(150) NOT NULL,
+        outward_dock_no VARCHAR(50) DEFAULT NULL,
+        outward_vehicle_reporting_time VARCHAR(50) DEFAULT NULL,
+        outward_loading_start_time VARCHAR(50) DEFAULT NULL,
+        outward_loading_duration_hours VARCHAR(50) DEFAULT NULL,
+        outward_loading_duration_mins VARCHAR(50) DEFAULT NULL,
+        outward_loading_end_time VARCHAR(50) DEFAULT NULL,
+        outward_pallets_in_qty INT DEFAULT 0,
+        outward_invoice_qty INT DEFAULT 0,
+        outward_received_qty INT DEFAULT 0,
+        outward_received_boxes_qty INT DEFAULT 0,
+        outward_short_received_boxes_qty INT DEFAULT 0,
+        outward_excess_received_boxes_qty INT DEFAULT 0,
+        outward_damage_received_boxes_qty INT DEFAULT 0,
+        outward_material_type VARCHAR(100) DEFAULT NULL,
+        outward_loading_supervisor_name VARCHAR(150) DEFAULT NULL,
+        outward_remarks TEXT DEFAULT NULL,
+        outward_invoice_photos VARCHAR(255) DEFAULT NULL,
+        outward_pod_photo VARCHAR(255) DEFAULT NULL,
+        outward_vehicle_seal_photo VARCHAR(255) DEFAULT NULL,
+        outward_vehicle_temp_photo VARCHAR(255) DEFAULT NULL,
+        outward_material_temp_photo VARCHAR(255) DEFAULT NULL,
+        outward_vehicle_back_side_photo VARCHAR(255) DEFAULT NULL,
+        outward_vehicle_back_side_photo_with_material VARCHAR(255) DEFAULT NULL,
+        outward_count_sheet_photo VARCHAR(255) DEFAULT NULL,
+        outward_damage_boxes_photo TEXT DEFAULT NULL,
+        outward_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        outward_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ outward_temp_logs table verified/created successfully.");
 
     // 2. Ensure vehicle_temp and material_temp columns exist if the table was previously created without them
     const [columns] = await db.query("SHOW COLUMNS FROM inward_temp_logs");
@@ -57,6 +107,64 @@ async function run() {
       console.log("➕ Added material_temp column to inward_temp_logs.");
     } else {
       console.log("ℹ️ material_temp column already exists.");
+    }
+
+    // 3. Create DO Operators, Super Admin, and Sub Admins tables
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS do_operators (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(150) NOT NULL UNIQUE,
+        password VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ do_operators table verified/created successfully.");
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS super_admin (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(150) NOT NULL UNIQUE,
+        password VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ super_admin table verified/created successfully.");
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS sub_admins (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(150) NOT NULL UNIQUE,
+        password VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log("✅ sub_admins table verified/created successfully.");
+
+    // 4. Seed initial default users if tables are empty
+    const salt = await bcrypt.genSalt(10);
+    
+    // Seed Super Admin
+    const [superAdmins] = await db.query("SELECT * FROM super_admin");
+    if (superAdmins.length === 0) {
+      const hashedPass = await bcrypt.hash("admin123", salt);
+      await db.query("INSERT INTO super_admin (email, password) VALUES (?, ?)", ["admin@reeferon.com", hashedPass]);
+      console.log("🌱 Default Super Admin user seeded (admin@reeferon.com / admin123).");
+    }
+
+    // Seed Sub Admin
+    const [subAdminsList] = await db.query("SELECT * FROM sub_admins");
+    if (subAdminsList.length === 0) {
+      const hashedPass = await bcrypt.hash("subadmin123", salt);
+      await db.query("INSERT INTO sub_admins (email, password) VALUES (?, ?)", ["subadmin@reeferon.com", hashedPass]);
+      console.log("🌱 Default Sub Admin user seeded (subadmin@reeferon.com / subadmin123).");
+    }
+
+    // Seed DO Operator
+    const [doOperators] = await db.query("SELECT * FROM do_operators");
+    if (doOperators.length === 0) {
+      const hashedPass = await bcrypt.hash("operator123", salt);
+      await db.query("INSERT INTO do_operators (email, password) VALUES (?, ?)", ["operator@reeferon.com", hashedPass]);
+      console.log("🌱 Default DO Operator user seeded (operator@reeferon.com / operator123).");
     }
     
     console.log("🎉 Database schema verification completed successfully!");

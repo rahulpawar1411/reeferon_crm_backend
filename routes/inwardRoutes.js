@@ -45,6 +45,7 @@ const uploadFields = upload.fields([
 
 router.get('/', controller.getInwardLogs);
 router.post('/', uploadFields, controller.addInwardLog);
+router.put('/:id', uploadFields, controller.updateInwardLog);
 router.delete('/:id', controller.deleteInwardLog);
 
 module.exports = router;
