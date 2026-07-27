@@ -7,6 +7,7 @@ const db = require('../config/db');
 const exifr = require('exifr');
 const fs = require('fs');
 const { logActivity } = require('../utils/logger');
+const { buildDiffString } = require('../utils/diffBuilder');
 
 let memoryChamberLogs = [];
 
@@ -76,12 +77,12 @@ exports.getChamberLogs = async (req, res) => {
     }
 
     if (search) {
-      conditions.push('(client_name LIKE ? OR chamber_name LIKE ? OR monitor_supervisor_name LIKE ? OR inspection_time LIKE ?)');
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+      conditions.push('(reference_no LIKE ? OR client_name LIKE ? OR chamber_name LIKE ? OR monitor_supervisor_name LIKE ? OR inspection_time LIKE ?)');
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const query = `SELECT id, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC`;
+    const query = `SELECT id, reference_no, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC`;
 
     const [rows] = await db.query(query, params);
     return res.json(rows);
@@ -90,6 +91,7 @@ exports.getChamberLogs = async (req, res) => {
     if (search) {
       const q = search.toLowerCase();
       filtered = filtered.filter(l => 
+        (l.reference_no && l.reference_no.toLowerCase().includes(q)) ||
         (l.client_name && l.client_name.toLowerCase().includes(q)) ||
         (l.chamber_name && l.chamber_name.toLowerCase().includes(q)) ||
         (l.inspection_time && l.inspection_time.toLowerCase().includes(q)) ||
@@ -174,16 +176,23 @@ exports.addChamberLog = async (req, res) => {
     ];
 
     const [result] = await db.query(query, values);
+    const insertId = result.insertId;
+    const reference_no = `RF-CH-26-${String(insertId).padStart(4, '0')}`;
+    try {
+      await db.query('UPDATE daily_chamber_temp_logs SET reference_no = ? WHERE id = ?', [reference_no, insertId]);
+    } catch (refErr) {
+      console.warn('⚠️ Failed to update reference_no for new chamber log:', refErr.message);
+    }
     
     // Log Operator Activity
     await logActivity(
       req.user ? req.user.email : 'unknown',
       'CREATE',
       'Chamber Temp Log',
-      `Created Chamber Temp record for entry date ${entry_date} and client ${client_name}`
+      `Created Chamber Temp record for entry date ${entry_date} and client ${client_name} (Ref: ${reference_no})`
     );
 
-    return res.status(201).json({ id: result.insertId, temp_sensor_image, photo_capture_time, time_variance_minutes, message: 'Chamber temperature record saved.' });
+    return res.status(201).json({ id: insertId, reference_no, temp_sensor_image, photo_capture_time, time_variance_minutes, message: 'Chamber temperature record saved.' });
   } catch (err) {
     const newLog = {
       id: Date.now(),
@@ -210,11 +219,12 @@ exports.updateChamberLog = async (req, res) => {
   const { chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, entry_date, client_name } = req.body;
 
   try {
-    const [existingRows] = await db.query('SELECT entry_date, inspection_time, temp_sensor_image, photo_capture_time, time_variance_minutes FROM daily_chamber_temp_logs WHERE id = ?', [id]);
+    const [existingRows] = await db.query('SELECT reference_no, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes FROM daily_chamber_temp_logs WHERE id = ?', [id]);
     
     let temp_sensor_image = req.body.temp_sensor_image;
     let photo_capture_time = null;
     let time_variance_minutes = 0;
+    let update_details = null;
 
     if (existingRows.length > 0) {
       const current = existingRows[0];
@@ -248,6 +258,28 @@ exports.updateChamberLog = async (req, res) => {
       if (photo_capture_time) {
         time_variance_minutes = calculateVariance(mergedEntryDate, mergedInspectionTime, photo_capture_time);
       }
+
+      const updatedValues = {
+        entry_date: entry_date || current.entry_date,
+        client_name: client_name || current.client_name,
+        chamber_name: chamber_name || current.chamber_name,
+        inspection_time: inspection_time || current.inspection_time,
+        chamber_temp: chamber_temp !== undefined ? (chamber_temp !== '' ? parseFloat(chamber_temp) : null) : current.chamber_temp,
+        monitor_supervisor_name: monitor_supervisor_name || current.monitor_supervisor_name,
+        temp_sensor_image: temp_sensor_image
+      };
+
+      const chamberFieldMapping = {
+        entry_date: 'Date',
+        client_name: 'Client Name',
+        chamber_name: 'Chamber',
+        inspection_time: 'Inspection Time',
+        chamber_temp: 'Chamber Temp',
+        monitor_supervisor_name: 'Supervisor',
+        temp_sensor_image: 'Sensor Image'
+      };
+
+      update_details = buildDiffString(current, updatedValues, chamberFieldMapping);
     }
 
     const localTimestamp = formatDateTime(new Date());
@@ -263,6 +295,7 @@ exports.updateChamberLog = async (req, res) => {
         temp_sensor_image = COALESCE(?, temp_sensor_image),
         photo_capture_time = ?,
         time_variance_minutes = ?,
+        update_details = ?,
         updated_at = ?
       WHERE id = ?
     `;
@@ -276,6 +309,7 @@ exports.updateChamberLog = async (req, res) => {
       temp_sensor_image,
       photo_capture_time,
       time_variance_minutes,
+      update_details || null,
       localTimestamp,
       id
     ]);
@@ -285,7 +319,7 @@ exports.updateChamberLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'UPDATE',
       'Chamber Temp Log',
-      `Updated Chamber Temp record ID #${id}`
+      `Updated Chamber Temp record ID #${id} (Ref: ${current.reference_no || ''})${update_details ? `. Changes: ${update_details}` : ''}`
     );
 
     return res.json({ message: 'Record updated successfully.', photo_capture_time, time_variance_minutes });

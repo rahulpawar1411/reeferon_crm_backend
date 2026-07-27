@@ -36,6 +36,7 @@ const uploadFields = upload.fields([
   { name: 'outward_pod_photo', maxCount: 1 },
   { name: 'outward_vehicle_seal_photo', maxCount: 1 },
   { name: 'outward_vehicle_temp_photo', maxCount: 1 },
+  { name: 'outward_pre_vehicle_temp_photo', maxCount: 1 },
   { name: 'outward_material_temp_photo', maxCount: 1 },
   { name: 'outward_vehicle_back_side_photo', maxCount: 1 },
   { name: 'outward_vehicle_back_side_photo_with_material', maxCount: 1 },

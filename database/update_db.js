@@ -39,8 +39,8 @@ async function run() {
         inward_material_temp_photo VARCHAR(255) DEFAULT NULL,
         inward_vehicle_back_side_photo VARCHAR(255) DEFAULT NULL,
         inward_vehicle_back_side_photo_with_material VARCHAR(255) DEFAULT NULL,
-        inward_count_sheet_photo VARCHAR(255) DEFAULT NULL,
         inward_damage_boxes_photo TEXT DEFAULT NULL,
+        update_details TEXT DEFAULT NULL,
         inward_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         inward_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
@@ -55,6 +55,7 @@ async function run() {
         outward_vehicle_no VARCHAR(50) NOT NULL,
         outward_seal_no VARCHAR(100) DEFAULT NULL,
         outward_vehicle_temp DECIMAL(5,2) DEFAULT NULL,
+        outward_pre_vehicle_temp DECIMAL(5,2) DEFAULT NULL,
         outward_material_temp DECIMAL(5,2) DEFAULT NULL,
         outward_transporter_name VARCHAR(150) DEFAULT NULL,
         outward_driver_name VARCHAR(150) DEFAULT NULL,
@@ -80,11 +81,12 @@ async function run() {
         outward_pod_photo VARCHAR(255) DEFAULT NULL,
         outward_vehicle_seal_photo VARCHAR(255) DEFAULT NULL,
         outward_vehicle_temp_photo VARCHAR(255) DEFAULT NULL,
+        outward_pre_vehicle_temp_photo VARCHAR(255) DEFAULT NULL,
         outward_material_temp_photo VARCHAR(255) DEFAULT NULL,
         outward_vehicle_back_side_photo VARCHAR(255) DEFAULT NULL,
         outward_vehicle_back_side_photo_with_material VARCHAR(255) DEFAULT NULL,
-        outward_count_sheet_photo VARCHAR(255) DEFAULT NULL,
         outward_damage_boxes_photo TEXT DEFAULT NULL,
+        update_details TEXT DEFAULT NULL,
         outward_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         outward_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )

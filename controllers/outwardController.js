@@ -7,6 +7,7 @@ const db = require('../config/db');
 const fs = require('fs');
 const path = require('path');
 const { logActivity } = require('../utils/logger');
+const { buildDiffString } = require('../utils/diffBuilder');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -33,22 +34,22 @@ exports.getOutwardLogs = async (req, res) => {
     }
 
     if (search) {
-      conditions.push('(outward_vehicle_no LIKE ? OR outward_client_name LIKE ? OR outward_transporter_name LIKE ? OR outward_driver_name LIKE ?)');
+      conditions.push('(reference_no LIKE ? OR outward_vehicle_no LIKE ? OR outward_client_name LIKE ? OR outward_transporter_name LIKE ? OR outward_driver_name LIKE ?)');
       const pattern = `%${search}%`;
-      params.push(pattern, pattern, pattern, pattern);
+      params.push(pattern, pattern, pattern, pattern, pattern);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const query = `
-      SELECT outward_id, DATE_FORMAT(outward_entry_date, '%Y-%m-%d') as outward_entry_date, outward_vehicle_no, outward_seal_no, 
-             outward_vehicle_temp, outward_material_temp, outward_transporter_name, outward_driver_name, outward_driver_no, 
+      SELECT outward_id, reference_no, DATE_FORMAT(outward_entry_date, '%Y-%m-%d') as outward_entry_date, outward_vehicle_no, outward_seal_no, 
+             outward_vehicle_temp, outward_pre_vehicle_temp, outward_material_temp, outward_transporter_name, outward_driver_name, outward_driver_no, 
              outward_client_name, outward_dock_no, outward_vehicle_reporting_time, outward_loading_start_time,
              outward_loading_duration_hours, outward_loading_duration_mins, outward_loading_end_time, 
              outward_pallets_in_qty, outward_invoice_qty, outward_received_qty, outward_received_boxes_qty, 
              outward_short_received_boxes_qty, outward_excess_received_boxes_qty, outward_damage_received_boxes_qty, 
              outward_material_type, outward_loading_supervisor_name, outward_remarks, outward_invoice_photos, outward_pod_photo, 
-             outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_material_temp_photo, outward_vehicle_back_side_photo, 
-             outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, outward_created_at, outward_updated_at, warehouse_name, operator_email
+             outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_pre_vehicle_temp_photo, outward_material_temp_photo, outward_vehicle_back_side_photo, 
+             outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, update_details, outward_created_at, outward_updated_at, warehouse_name, operator_email
       FROM outward_temp_logs 
       ${whereClause}
       ORDER BY outward_entry_date DESC, outward_id DESC
@@ -82,7 +83,8 @@ exports.addOutwardLog = async (req, res) => {
     const outward_invoice_photos = getPhotoPath('outward_invoice_photos');
     const outward_pod_photo = getPhotoPath('outward_pod_photo');
     const outward_vehicle_seal_photo = getPhotoPath('outward_vehicle_seal_photo');
-    const outward_vehicle_temp_photo = getPhotoPath('outward_vehicle_temp_photo');
+    const outward_pre_vehicle_temp_photo = getPhotoPath('outward_pre_vehicle_temp_photo') || getPhotoPath('outward_vehicle_temp_photo');
+    const outward_vehicle_temp_photo = outward_pre_vehicle_temp_photo;
     const outward_material_temp_photo = getPhotoPath('outward_material_temp_photo');
     const outward_vehicle_back_side_photo = getPhotoPath('outward_vehicle_back_side_photo');
     const outward_vehicle_back_side_photo_with_material = getPhotoPath('outward_vehicle_back_side_photo_with_material');
@@ -106,24 +108,57 @@ exports.addOutwardLog = async (req, res) => {
       }
     }
 
+    let endWithDate = data.outward_loading_end_time || null;
+    if (data.outward_entry_date && data.outward_loading_end_time) {
+      const dateParts = data.outward_entry_date.split('-');
+      if (dateParts.length === 3) {
+        const [yyyy, mm, dd] = dateParts;
+        if (!data.outward_loading_end_time.includes('-')) {
+          let targetDay = parseInt(dd);
+          let targetMonth = parseInt(mm);
+          let targetYear = parseInt(yyyy);
+
+          if (data.outward_loading_start_time) {
+            const [startH, startM] = data.outward_loading_start_time.split(':').map(Number);
+            const [endH, endM] = data.outward_loading_end_time.split(':').map(Number);
+            if ((endH * 60 + endM) < (startH * 60 + startM)) {
+              const dt = new Date(targetYear, targetMonth - 1, targetDay + 1);
+              targetDay = dt.getDate();
+              targetMonth = dt.getMonth() + 1;
+              targetYear = dt.getFullYear();
+            }
+          }
+
+          const ddStr = String(targetDay).padStart(2, '0');
+          const mmStr = String(targetMonth).padStart(2, '0');
+          endWithDate = `${ddStr}-${mmStr}-${targetYear} ${data.outward_loading_end_time}`;
+        }
+      }
+    }
+
+    const preTemp = data.outward_pre_vehicle_temp !== undefined && data.outward_pre_vehicle_temp !== '' 
+      ? parseFloat(data.outward_pre_vehicle_temp) 
+      : (data.outward_vehicle_temp !== undefined && data.outward_vehicle_temp !== '' ? parseFloat(data.outward_vehicle_temp) : null);
+
     const query = `
       INSERT INTO outward_temp_logs (
-        outward_entry_date, outward_vehicle_no, outward_seal_no, outward_vehicle_temp, outward_material_temp, outward_transporter_name, 
+        outward_entry_date, outward_vehicle_no, outward_seal_no, outward_vehicle_temp, outward_pre_vehicle_temp, outward_material_temp, outward_transporter_name, 
         outward_driver_name, outward_driver_no, outward_client_name, outward_dock_no, outward_vehicle_reporting_time, 
         outward_loading_start_time, outward_loading_duration_hours, outward_loading_duration_mins, outward_loading_end_time, outward_pallets_in_qty, outward_invoice_qty, 
         outward_received_qty, outward_received_boxes_qty, outward_short_received_boxes_qty, outward_excess_received_boxes_qty, 
         outward_damage_received_boxes_qty, outward_material_type, outward_loading_supervisor_name, outward_remarks, 
-        outward_invoice_photos, outward_pod_photo, outward_vehicle_seal_photo, outward_vehicle_temp_photo, 
+        outward_invoice_photos, outward_pod_photo, outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_pre_vehicle_temp_photo, 
         outward_material_temp_photo, outward_vehicle_back_side_photo, outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo,
         outward_created_at, outward_updated_at, warehouse_name, operator_email
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const values = [
       data.outward_entry_date,
       data.outward_vehicle_no,
       data.outward_seal_no || null,
-      data.outward_vehicle_temp !== undefined && data.outward_vehicle_temp !== '' ? parseFloat(data.outward_vehicle_temp) : null,
+      preTemp,
+      preTemp,
       data.outward_material_temp !== undefined && data.outward_material_temp !== '' ? parseFloat(data.outward_material_temp) : null,
       data.outward_transporter_name || null,
       data.outward_driver_name || null,
@@ -134,11 +169,11 @@ exports.addOutwardLog = async (req, res) => {
       startWithDate,
       data.outward_loading_duration_hours || null,
       data.outward_loading_duration_mins || null,
-      data.outward_loading_end_time || null,
+      endWithDate,
       data.outward_pallets_in_qty !== undefined && data.outward_pallets_in_qty !== '' ? parseInt(data.outward_pallets_in_qty) : 0,
       data.outward_invoice_qty !== undefined && data.outward_invoice_qty !== '' ? parseInt(data.outward_invoice_qty) : 0,
-      data.outward_received_qty !== undefined && data.outward_received_qty !== '' ? parseInt(data.outward_received_qty) : 0,
-      data.outward_received_boxes_qty !== undefined && data.outward_received_boxes_qty !== '' ? parseInt(data.outward_received_boxes_qty) : 0,
+      data.outward_received_boxes_qty !== undefined && data.outward_received_boxes_qty !== '' ? parseInt(data.outward_received_boxes_qty) : (data.outward_received_qty !== undefined && data.outward_received_qty !== '' ? parseInt(data.outward_received_qty) : 0),
+      data.outward_received_boxes_qty !== undefined && data.outward_received_boxes_qty !== '' ? parseInt(data.outward_received_boxes_qty) : (data.outward_received_qty !== undefined && data.outward_received_qty !== '' ? parseInt(data.outward_received_qty) : 0),
       data.outward_short_received_boxes_qty !== undefined && data.outward_short_received_boxes_qty !== '' ? parseInt(data.outward_short_received_boxes_qty) : 0,
       data.outward_excess_received_boxes_qty !== undefined && data.outward_excess_received_boxes_qty !== '' ? parseInt(data.outward_excess_received_boxes_qty) : 0,
       data.outward_damage_received_boxes_qty !== undefined && data.outward_damage_received_boxes_qty !== '' ? parseInt(data.outward_damage_received_boxes_qty) : 0,
@@ -149,6 +184,7 @@ exports.addOutwardLog = async (req, res) => {
       outward_pod_photo,
       outward_vehicle_seal_photo,
       outward_vehicle_temp_photo,
+      outward_pre_vehicle_temp_photo,
       outward_material_temp_photo,
       outward_vehicle_back_side_photo,
       outward_vehicle_back_side_photo_with_material,
@@ -161,16 +197,23 @@ exports.addOutwardLog = async (req, res) => {
     ];
 
     const [result] = await db.query(query, values);
+    const insertId = result.insertId;
+    const reference_no = `RF-OUT-26-${String(insertId).padStart(4, '0')}`;
+    try {
+      await db.query('UPDATE outward_temp_logs SET reference_no = ? WHERE outward_id = ?', [reference_no, insertId]);
+    } catch (refErr) {
+      console.warn('⚠️ Failed to update reference_no for new outward log:', refErr.message);
+    }
     
     // Log Operator Activity
     await logActivity(
       req.user ? req.user.email : 'unknown',
       'CREATE',
       'Outward Log',
-      `Created Outward record for vehicle ${data.outward_vehicle_no} and client ${data.outward_client_name}`
+      `Created Outward record for vehicle ${data.outward_vehicle_no} and client ${data.outward_client_name} (Ref: ${reference_no})`
     );
 
-    return res.status(201).json({ id: result.insertId, message: 'Outward temperature record saved successfully.' });
+    return res.status(201).json({ id: insertId, reference_no, message: 'Outward temperature record saved successfully.' });
   } catch (err) {
     console.error('Error creating outward log:', err);
     return res.status(500).json({ error: 'Failed to save outward log.' });
@@ -219,6 +262,9 @@ exports.deleteOutwardLog = async (req, res) => {
     cleanupFile(record.outward_pod_photo);
     cleanupFile(record.outward_vehicle_seal_photo);
     cleanupFile(record.outward_vehicle_temp_photo);
+    if (record.outward_pre_vehicle_temp_photo && record.outward_pre_vehicle_temp_photo !== record.outward_vehicle_temp_photo) {
+      cleanupFile(record.outward_pre_vehicle_temp_photo);
+    }
     cleanupFile(record.outward_material_temp_photo);
     cleanupFile(record.outward_vehicle_back_side_photo);
     cleanupFile(record.outward_vehicle_back_side_photo_with_material);
@@ -261,7 +307,8 @@ exports.updateOutwardLog = async (req, res) => {
     const outward_invoice_photos = getPhotoPath('outward_invoice_photos', current.outward_invoice_photos);
     const outward_pod_photo = getPhotoPath('outward_pod_photo', current.outward_pod_photo);
     const outward_vehicle_seal_photo = getPhotoPath('outward_vehicle_seal_photo', current.outward_vehicle_seal_photo);
-    const outward_vehicle_temp_photo = getPhotoPath('outward_vehicle_temp_photo', current.outward_vehicle_temp_photo);
+    const outward_pre_vehicle_temp_photo = getPhotoPath('outward_pre_vehicle_temp_photo', current.outward_pre_vehicle_temp_photo) || getPhotoPath('outward_vehicle_temp_photo', current.outward_vehicle_temp_photo);
+    const outward_vehicle_temp_photo = outward_pre_vehicle_temp_photo;
     const outward_material_temp_photo = getPhotoPath('outward_material_temp_photo', current.outward_material_temp_photo);
     const outward_vehicle_back_side_photo = getPhotoPath('outward_vehicle_back_side_photo', current.outward_vehicle_back_side_photo);
     const outward_vehicle_back_side_photo_with_material = getPhotoPath('outward_vehicle_back_side_photo_with_material', current.outward_vehicle_back_side_photo_with_material);
@@ -280,6 +327,7 @@ exports.updateOutwardLog = async (req, res) => {
         outward_vehicle_no = COALESCE(?, outward_vehicle_no),
         outward_seal_no = ?,
         outward_vehicle_temp = ?,
+        outward_pre_vehicle_temp = ?,
         outward_material_temp = ?,
         outward_transporter_name = ?,
         outward_driver_name = ?,
@@ -305,11 +353,13 @@ exports.updateOutwardLog = async (req, res) => {
         outward_pod_photo = ?,
         outward_vehicle_seal_photo = ?,
         outward_vehicle_temp_photo = ?,
+        outward_pre_vehicle_temp_photo = ?,
         outward_material_temp_photo = ?,
         outward_vehicle_back_side_photo = ?,
         outward_vehicle_back_side_photo_with_material = ?,
         outward_count_sheet_photo = ?,
         outward_damage_boxes_photo = ?,
+        update_details = ?,
         outward_updated_at = ?
       WHERE outward_id = ?
     `;
@@ -326,11 +376,126 @@ exports.updateOutwardLog = async (req, res) => {
       }
     }
 
+    let endWithDate = data.outward_loading_end_time !== undefined ? data.outward_loading_end_time : current.outward_loading_end_time;
+    if (endWithDate && !endWithDate.includes('-')) {
+      const entryDate = data.outward_entry_date || current.outward_entry_date;
+      if (entryDate) {
+        const dateParts = entryDate.split('-');
+        if (dateParts.length === 3) {
+          const [yyyy, mm, dd] = dateParts;
+          let targetDay = parseInt(dd);
+          let targetMonth = parseInt(mm);
+          let targetYear = parseInt(yyyy);
+
+          const startTimeVal = data.outward_loading_start_time !== undefined ? data.outward_loading_start_time : current.outward_loading_start_time;
+          if (startTimeVal && !startTimeVal.includes('-')) {
+            const [startH, startM] = startTimeVal.split(':').map(Number);
+            const [endH, endM] = endWithDate.split(':').map(Number);
+            if ((endH * 60 + endM) < (startH * 60 + startM)) {
+              const dt = new Date(targetYear, targetMonth - 1, targetDay + 1);
+              targetDay = dt.getDate();
+              targetMonth = dt.getMonth() + 1;
+              targetYear = dt.getFullYear();
+            }
+          }
+
+          const ddStr = String(targetDay).padStart(2, '0');
+          const mmStr = String(targetMonth).padStart(2, '0');
+          endWithDate = `${ddStr}-${mmStr}-${targetYear} ${endWithDate}`;
+        }
+      }
+    }
+
+    const preTemp = data.outward_pre_vehicle_temp !== undefined && data.outward_pre_vehicle_temp !== '' 
+      ? parseFloat(data.outward_pre_vehicle_temp) 
+      : (data.outward_vehicle_temp !== undefined && data.outward_vehicle_temp !== '' ? parseFloat(data.outward_vehicle_temp) : current.outward_pre_vehicle_temp || current.outward_vehicle_temp);
+
+    const updatedValues = {
+      outward_entry_date: data.outward_entry_date || current.outward_entry_date,
+      outward_vehicle_no: data.outward_vehicle_no || current.outward_vehicle_no,
+      outward_seal_no: data.outward_seal_no !== undefined ? data.outward_seal_no : current.outward_seal_no,
+      outward_vehicle_temp: preTemp,
+      outward_pre_vehicle_temp: preTemp,
+      outward_material_temp: data.outward_material_temp !== undefined && data.outward_material_temp !== '' ? parseFloat(data.outward_material_temp) : current.outward_material_temp,
+      outward_transporter_name: data.outward_transporter_name !== undefined ? data.outward_transporter_name : current.outward_transporter_name,
+      outward_driver_name: data.outward_driver_name !== undefined ? data.outward_driver_name : current.outward_driver_name,
+      outward_driver_no: data.outward_driver_no !== undefined ? data.outward_driver_no : current.outward_driver_no,
+      outward_client_name: data.outward_client_name || current.outward_client_name,
+      outward_dock_no: data.outward_dock_no !== undefined ? data.outward_dock_no : current.outward_dock_no,
+      outward_vehicle_reporting_time: data.outward_vehicle_reporting_time !== undefined ? data.outward_vehicle_reporting_time : current.outward_vehicle_reporting_time,
+      outward_loading_start_time: startWithDate,
+      outward_loading_duration_hours: data.outward_loading_duration_hours !== undefined ? data.outward_loading_duration_hours : current.outward_loading_duration_hours,
+      outward_loading_duration_mins: data.outward_loading_duration_mins !== undefined ? data.outward_loading_duration_mins : current.outward_loading_duration_mins,
+      outward_loading_end_time: endWithDate,
+      outward_pallets_in_qty: data.outward_pallets_in_qty !== undefined && data.outward_pallets_in_qty !== '' ? parseInt(data.outward_pallets_in_qty) : current.outward_pallets_in_qty,
+      outward_invoice_qty: data.outward_invoice_qty !== undefined && data.outward_invoice_qty !== '' ? parseInt(data.outward_invoice_qty) : current.outward_invoice_qty,
+      outward_received_boxes_qty: data.outward_received_boxes_qty !== undefined && data.outward_received_boxes_qty !== '' ? parseInt(data.outward_received_boxes_qty) : (data.outward_received_qty !== undefined && data.outward_received_qty !== '' ? parseInt(data.outward_received_qty) : current.outward_received_boxes_qty || current.outward_received_qty || 0),
+      outward_received_qty: data.outward_received_boxes_qty !== undefined && data.outward_received_boxes_qty !== '' ? parseInt(data.outward_received_boxes_qty) : (data.outward_received_qty !== undefined && data.outward_received_qty !== '' ? parseInt(data.outward_received_qty) : current.outward_received_boxes_qty || current.outward_received_qty || 0),
+      outward_short_received_boxes_qty: data.outward_short_received_boxes_qty !== undefined && data.outward_short_received_boxes_qty !== '' ? parseInt(data.outward_short_received_boxes_qty) : current.outward_short_received_boxes_qty,
+      outward_excess_received_boxes_qty: data.outward_excess_received_boxes_qty !== undefined && data.outward_excess_received_boxes_qty !== '' ? parseInt(data.outward_excess_received_boxes_qty) : current.outward_excess_received_boxes_qty,
+      outward_damage_received_boxes_qty: data.outward_damage_received_boxes_qty !== undefined && data.outward_damage_received_boxes_qty !== '' ? parseInt(data.outward_damage_received_boxes_qty) : current.outward_damage_received_boxes_qty,
+      outward_material_type: data.outward_material_type !== undefined ? data.outward_material_type : current.outward_material_type,
+      outward_loading_supervisor_name: data.outward_loading_supervisor_name !== undefined ? data.outward_loading_supervisor_name : current.outward_loading_supervisor_name,
+      outward_remarks: data.outward_remarks !== undefined ? data.outward_remarks : current.outward_remarks,
+      outward_invoice_photos,
+      outward_pod_photo,
+      outward_vehicle_seal_photo,
+      outward_vehicle_temp_photo,
+      outward_pre_vehicle_temp_photo,
+      outward_material_temp_photo,
+      outward_vehicle_back_side_photo,
+      outward_vehicle_back_side_photo_with_material,
+      outward_count_sheet_photo,
+      outward_damage_boxes_photo
+    };
+
+    const outwardFieldMapping = {
+      outward_entry_date: 'Entry Date',
+      outward_vehicle_no: 'Vehicle No',
+      outward_seal_no: 'Seal No',
+      outward_vehicle_temp: 'Vehicle Temp',
+      outward_pre_vehicle_temp: 'Pre Vehicle Temp',
+      outward_material_temp: 'Material Temp',
+      outward_transporter_name: 'Transporter Name',
+      outward_driver_name: 'Driver Name',
+      outward_driver_no: 'Driver Phone',
+      outward_client_name: 'Client Name',
+      outward_dock_no: 'Dock No',
+      outward_vehicle_reporting_time: 'Reporting Time',
+      outward_loading_start_time: 'Loading Start Time',
+      outward_loading_duration_hours: 'Loading Duration Hours',
+      outward_loading_duration_mins: 'Loading Duration Mins',
+      outward_loading_end_time: 'Loading End Time',
+      outward_pallets_in_qty: 'Pallets In Qty',
+      outward_invoice_qty: 'Invoice Qty',
+      outward_received_qty: 'Received Qty',
+      outward_received_boxes_qty: 'Received Boxes Qty',
+      outward_short_received_boxes_qty: 'Short Received Boxes Qty',
+      outward_excess_received_boxes_qty: 'Excess Received Boxes Qty',
+      outward_damage_received_boxes_qty: 'Damage Received Boxes Qty',
+      outward_material_type: 'Material Type',
+      outward_loading_supervisor_name: 'Loading Supervisor Name',
+      outward_remarks: 'Remarks',
+      outward_invoice_photos: 'Invoice Photo',
+      outward_pod_photo: 'POD Photo',
+      outward_vehicle_seal_photo: 'Vehicle Seal Photo',
+      outward_vehicle_temp_photo: 'Vehicle Temp Photo',
+      outward_pre_vehicle_temp_photo: 'Pre Vehicle Temp Photo',
+      outward_material_temp_photo: 'Material Temp Photo',
+      outward_vehicle_back_side_photo: 'Vehicle Back Photo',
+      outward_vehicle_back_side_photo_with_material: 'Vehicle Back Photo With Material',
+      outward_count_sheet_photo: 'Count Sheet Photo',
+      outward_damage_boxes_photo: 'Damage Boxes Photo'
+    };
+
+    const update_details = buildDiffString(current, updatedValues, outwardFieldMapping);
+
     const values = [
       data.outward_entry_date,
       data.outward_vehicle_no,
       data.outward_seal_no !== undefined ? data.outward_seal_no : current.outward_seal_no,
-      data.outward_vehicle_temp !== undefined && data.outward_vehicle_temp !== '' ? parseFloat(data.outward_vehicle_temp) : current.outward_vehicle_temp,
+      preTemp,
+      preTemp,
       data.outward_material_temp !== undefined && data.outward_material_temp !== '' ? parseFloat(data.outward_material_temp) : current.outward_material_temp,
       data.outward_transporter_name !== undefined ? data.outward_transporter_name : current.outward_transporter_name,
       data.outward_driver_name !== undefined ? data.outward_driver_name : current.outward_driver_name,
@@ -341,11 +506,11 @@ exports.updateOutwardLog = async (req, res) => {
       startWithDate,
       data.outward_loading_duration_hours !== undefined ? data.outward_loading_duration_hours : current.outward_loading_duration_hours,
       data.outward_loading_duration_mins !== undefined ? data.outward_loading_duration_mins : current.outward_loading_duration_mins,
-      data.outward_loading_end_time !== undefined ? data.outward_loading_end_time : current.outward_loading_end_time,
+      endWithDate,
       data.outward_pallets_in_qty !== undefined && data.outward_pallets_in_qty !== '' ? parseInt(data.outward_pallets_in_qty) : current.outward_pallets_in_qty,
       data.outward_invoice_qty !== undefined && data.outward_invoice_qty !== '' ? parseInt(data.outward_invoice_qty) : current.outward_invoice_qty,
-      data.outward_received_qty !== undefined && data.outward_received_qty !== '' ? parseInt(data.outward_received_qty) : current.outward_received_qty,
-      data.outward_received_boxes_qty !== undefined && data.outward_received_boxes_qty !== '' ? parseInt(data.outward_received_boxes_qty) : current.outward_received_boxes_qty,
+      data.outward_received_boxes_qty !== undefined && data.outward_received_boxes_qty !== '' ? parseInt(data.outward_received_boxes_qty) : (data.outward_received_qty !== undefined && data.outward_received_qty !== '' ? parseInt(data.outward_received_qty) : current.outward_received_boxes_qty || current.outward_received_qty || 0),
+      data.outward_received_boxes_qty !== undefined && data.outward_received_boxes_qty !== '' ? parseInt(data.outward_received_boxes_qty) : (data.outward_received_qty !== undefined && data.outward_received_qty !== '' ? parseInt(data.outward_received_qty) : current.outward_received_boxes_qty || current.outward_received_qty || 0),
       data.outward_short_received_boxes_qty !== undefined && data.outward_short_received_boxes_qty !== '' ? parseInt(data.outward_short_received_boxes_qty) : current.outward_short_received_boxes_qty,
       data.outward_excess_received_boxes_qty !== undefined && data.outward_excess_received_boxes_qty !== '' ? parseInt(data.outward_excess_received_boxes_qty) : current.outward_excess_received_boxes_qty,
       data.outward_damage_received_boxes_qty !== undefined && data.outward_damage_received_boxes_qty !== '' ? parseInt(data.outward_damage_received_boxes_qty) : current.outward_damage_received_boxes_qty,
@@ -356,11 +521,13 @@ exports.updateOutwardLog = async (req, res) => {
       outward_pod_photo,
       outward_vehicle_seal_photo,
       outward_vehicle_temp_photo,
+      outward_pre_vehicle_temp_photo,
       outward_material_temp_photo,
       outward_vehicle_back_side_photo,
       outward_vehicle_back_side_photo_with_material,
       outward_count_sheet_photo,
       outward_damage_boxes_photo,
+      update_details || null,
       localTimestamp,
       id
     ];
@@ -372,7 +539,7 @@ exports.updateOutwardLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'UPDATE',
       'Outward Log',
-      `Updated Outward record ID #${id} for vehicle ${data.outward_vehicle_no || current.outward_vehicle_no}`
+      `Updated Outward record ID #${id} (Ref: ${current.reference_no}) for vehicle ${data.outward_vehicle_no || current.outward_vehicle_no}${update_details ? `. Changes: ${update_details}` : ''}`
     );
 
     return res.json({ message: 'Outward temperature record updated successfully.' });

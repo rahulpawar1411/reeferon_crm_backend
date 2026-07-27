@@ -22,13 +22,46 @@ app.use(helmet({
 
 // CORS Configuration with Credentials Support (Required for HttpOnly Cookies)
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:5000'], // Allowed frontend origins
+  origin: ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000'], // Allowed frontend origins
   credentials: true
 }));
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(cookieParser());
+
+// Response Interceptor Middleware to log system/database errors to the DB automatically
+app.use((req, res, next) => {
+  const originalJson = res.json;
+  const originalSend = res.send;
+
+  res.json = function (body) {
+    if (res.statusCode >= 500) {
+      const { logActivity } = require('./utils/logger');
+      const email = req.user?.email || 'system';
+      const errMsg = body?.error || body?.message || JSON.stringify(body) || 'Unknown error';
+      logActivity(email, 'SYSTEM_ERROR', 'ERROR', `Error on ${req.method} ${req.originalUrl}: ${errMsg}`).catch(err => {
+        console.error('Failed to log error response:', err);
+      });
+    }
+    return originalJson.apply(this, arguments);
+  };
+
+  res.send = function (body) {
+    if (res.statusCode >= 500) {
+      const { logActivity } = require('./utils/logger');
+      const email = req.user?.email || 'system';
+      const errMsg = typeof body === 'string' ? body : JSON.stringify(body);
+      logActivity(email, 'SYSTEM_ERROR', 'ERROR', `Error on ${req.method} ${req.originalUrl}: ${errMsg.substring(0, 500)}`).catch(err => {
+        console.error('Failed to log error response:', err);
+      });
+    }
+    return originalSend.apply(this, arguments);
+  };
+
+  next();
+});
+
 
 // Rate Limiter for Login Endpoint (Brute-force protection)
 const loginRateLimiter = rateLimit({
@@ -91,6 +124,19 @@ app.get('*', (req, res) => {
     return res.status(404).json({ error: 'API route not found' });
   }
   res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
+});
+
+// Global unhandled error handling middleware boundary
+app.use(async (err, req, res, next) => {
+  console.error('❌ Unhandled Exception:', err);
+  try {
+    const { logActivity } = require('./utils/logger');
+    const userEmail = req.user?.email || 'system';
+    await logActivity(userEmail, 'SYSTEM_ERROR', 'ERROR', `Unhandled Exception: ${err.message}. Route: ${req.method} ${req.originalUrl}. Stack: ${err.stack?.substring(0, 300)}`);
+  } catch (logErr) {
+    console.error('Failed to log unhandled exception:', logErr);
+  }
+  res.status(500).json({ error: 'A system error occurred. Please contact support.' });
 });
 
 // Start Server

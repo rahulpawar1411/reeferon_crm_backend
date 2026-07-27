@@ -16,6 +16,7 @@ CREATE TABLE daily_chamber_temp_logs (
     temp_sensor_image VARCHAR(255) DEFAULT NULL,
     photo_capture_time VARCHAR(50) DEFAULT NULL,
     time_variance_minutes INT DEFAULT 0,
+    update_details TEXT DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
@@ -90,6 +91,7 @@ CREATE TABLE IF NOT EXISTS inward_temp_logs (
     inward_vehicle_back_side_photo_with_material VARCHAR(255) DEFAULT NULL,
     inward_count_sheet_photo VARCHAR(255) DEFAULT NULL,
     inward_damage_boxes_photo TEXT DEFAULT NULL,
+    update_details TEXT DEFAULT NULL,
     inward_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     inward_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );

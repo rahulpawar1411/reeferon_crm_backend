@@ -104,9 +104,28 @@ exports.createPermissionRequest = async (req, res) => {
       }
     }
 
+    // Fetch target record's reference_no
+    let refQuery = '';
+    if (record_type === 'Chamber') {
+      refQuery = 'SELECT reference_no FROM daily_chamber_temp_logs WHERE id = ? LIMIT 1';
+    } else if (record_type === 'Inward') {
+      refQuery = 'SELECT reference_no FROM inward_temp_logs WHERE inward_id = ? LIMIT 1';
+    } else if (record_type === 'Outward') {
+      refQuery = 'SELECT reference_no FROM outward_temp_logs WHERE outward_id = ? LIMIT 1';
+    }
+    
+    let reference_no = '';
+    if (refQuery) {
+      const [refRows] = await db.query(refQuery, [record_id]);
+      if (refRows.length > 0) {
+        reference_no = refRows[0].reference_no;
+      }
+    }
+    const refText = reference_no ? `Ref: ${reference_no}` : `ID: ${record_id}`;
+
     // Insert new request as an activity log row
     const actionLabel = action === 'Edit' ? 'edit' : 'delete';
-    const descText = description || `Requested permission to ${actionLabel} ${record_type} log (ID: ${record_id})`;
+    const descText = description || `Requested permission to ${actionLabel} ${record_type} log (${refText})`;
     await logActivity(
       operator_email,
       reqActionType,
@@ -167,11 +186,30 @@ exports.updatePermissionRequestStatus = async (req, res) => {
     const statusText = status === 'Approved' ? 'Granted' : 'Denied';
     const verb = isEdit ? 'edit' : 'delete';
     
+    // Fetch target record's reference_no
+    let approvalRefQuery = '';
+    if (record_type === 'Chamber') {
+      approvalRefQuery = 'SELECT reference_no FROM daily_chamber_temp_logs WHERE id = ? LIMIT 1';
+    } else if (record_type === 'Inward') {
+      approvalRefQuery = 'SELECT reference_no FROM inward_temp_logs WHERE inward_id = ? LIMIT 1';
+    } else if (record_type === 'Outward') {
+      approvalRefQuery = 'SELECT reference_no FROM outward_temp_logs WHERE outward_id = ? LIMIT 1';
+    }
+    
+    let approvalRefNo = '';
+    if (approvalRefQuery) {
+      const [approvalRefRows] = await db.query(approvalRefQuery, [record_id]);
+      if (approvalRefRows.length > 0) {
+        approvalRefNo = approvalRefRows[0].reference_no;
+      }
+    }
+    const approvalRefText = approvalRefNo ? `Ref: ${approvalRefNo}` : `ID: ${record_id}`;
+
     await logActivity(
       operator_email,
       targetAction,
       record_type,
-      `Admin ${req.user.email} ${statusText.toLowerCase()} ${verb} permission on ${record_type} record (ID: ${record_id})`,
+      `Admin ${req.user.email} ${statusText.toLowerCase()} ${verb} permission on ${record_type} record (${approvalRefText})`,
       record_id
     );
 
