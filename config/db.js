@@ -48,6 +48,50 @@ async function testDbConnection() {
       console.warn('⚠️ Table do_operators verification skipped:', tblErr.message);
     }
 
+    // Auto migration: ensure sub_admins table and profile / access scope columns exist
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS sub_admins (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          email VARCHAR(150) NOT NULL UNIQUE,
+          password VARCHAR(255) NOT NULL,
+          full_name VARCHAR(150) DEFAULT NULL,
+          phone_no VARCHAR(20) DEFAULT NULL,
+          allowed_clients TEXT DEFAULT NULL,
+          allowed_warehouses TEXT DEFAULT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        )
+      `);
+
+      const [subColumns] = await pool.query('SHOW COLUMNS FROM sub_admins');
+      const subColNames = subColumns.map(c => c.Field);
+
+      if (!subColNames.includes('full_name')) {
+        await pool.query('ALTER TABLE sub_admins ADD COLUMN full_name VARCHAR(150) DEFAULT NULL');
+        console.log('🌱 Added column full_name to sub_admins.');
+      }
+      if (!subColNames.includes('phone_no')) {
+        await pool.query('ALTER TABLE sub_admins ADD COLUMN phone_no VARCHAR(20) DEFAULT NULL');
+        console.log('🌱 Added column phone_no to sub_admins.');
+      }
+      if (!subColNames.includes('allowed_clients')) {
+        await pool.query('ALTER TABLE sub_admins ADD COLUMN allowed_clients TEXT DEFAULT NULL');
+        console.log('🌱 Added column allowed_clients to sub_admins.');
+      }
+      if (!subColNames.includes('allowed_warehouses')) {
+        await pool.query('ALTER TABLE sub_admins ADD COLUMN allowed_warehouses TEXT DEFAULT NULL');
+        console.log('🌱 Added column allowed_warehouses to sub_admins.');
+      }
+      if (!subColNames.includes('updated_at')) {
+        await pool.query('ALTER TABLE sub_admins ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+        console.log('🌱 Added column updated_at to sub_admins.');
+      }
+      console.log('🌱 Verified sub_admins table schema.');
+    } catch (subErr) {
+      console.warn('⚠️ Table sub_admins verification skipped:', subErr.message);
+    }
+
     // Auto migration: create daily_temp_logs table if not exists
     try {
       await pool.query(`
@@ -96,6 +140,14 @@ async function testDbConnection() {
         if (!colNames.includes('update_details') && table !== 'daily_temp_logs') {
           await pool.query(`ALTER TABLE ${table} ADD COLUMN update_details TEXT DEFAULT NULL`);
           console.log(`🌱 Added column update_details to ${table}.`);
+        }
+        if (!colNames.includes('update_count') && table !== 'daily_temp_logs') {
+          await pool.query(`ALTER TABLE ${table} ADD COLUMN update_count INT NOT NULL DEFAULT 0`);
+          console.log(`🌱 Added column update_count to ${table}.`);
+          // Legacy rows that already have edit history → count at least 1
+          await pool.query(
+            `UPDATE ${table} SET update_count = 1 WHERE update_details IS NOT NULL AND TRIM(update_details) <> '' AND (update_count IS NULL OR update_count = 0)`
+          );
         }
       } catch (tblErr) {
         console.warn(`⚠️ Table ${table} verification skipped or failed:`, tblErr.message);
@@ -188,6 +240,12 @@ async function testDbConnection() {
       if (!colNames.includes('permission_req')) {
         await pool.query('ALTER TABLE do_operator_activities ADD COLUMN permission_req INT DEFAULT NULL');
       }
+      if (!colNames.includes('do_action_completed_at')) {
+        await pool.query(
+          'ALTER TABLE do_operator_activities ADD COLUMN do_action_completed_at TIMESTAMP NULL DEFAULT NULL'
+        );
+        console.log('🌱 Added column do_action_completed_at to do_operator_activities.');
+      }
 
       // Clean up deprecated do_permission_requests table if it exists
       await pool.query('DROP TABLE IF EXISTS do_permission_requests');
@@ -217,6 +275,53 @@ async function testDbConnection() {
       console.warn('⚠️ Table leads creation failed:', leadsErr.message);
     }
 
+    // Auto migration: customer issue reports (dedicated table for customer portal)
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS customer_reports (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          customer_id INT DEFAULT NULL,
+          customer_email VARCHAR(150) NOT NULL,
+          customer_name VARCHAR(150) DEFAULT NULL,
+          customer_phone VARCHAR(20) DEFAULT NULL,
+          allowed_clients TEXT DEFAULT NULL,
+          allowed_warehouses TEXT DEFAULT NULL,
+          reference_no VARCHAR(100) NOT NULL,
+          message TEXT NOT NULL,
+          status VARCHAR(50) DEFAULT 'Open',
+          reviewed_by_email VARCHAR(150) DEFAULT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          resolved_at TIMESTAMP NULL DEFAULT NULL,
+          INDEX idx_customer_reports_ref (reference_no),
+          INDEX idx_customer_reports_email (customer_email),
+          INDEX idx_customer_reports_status (status),
+          INDEX idx_customer_reports_customer_id (customer_id)
+        )
+      `);
+
+      const [crCols] = await pool.query('SHOW COLUMNS FROM customer_reports');
+      const crNames = crCols.map((c) => c.Field);
+      const crAlters = [
+        ['customer_id', 'ADD COLUMN customer_id INT DEFAULT NULL AFTER id'],
+        ['customer_phone', 'ADD COLUMN customer_phone VARCHAR(20) DEFAULT NULL AFTER customer_name'],
+        ['allowed_clients', 'ADD COLUMN allowed_clients TEXT DEFAULT NULL AFTER customer_phone'],
+        ['allowed_warehouses', 'ADD COLUMN allowed_warehouses TEXT DEFAULT NULL AFTER allowed_clients'],
+        ['reviewed_by_email', 'ADD COLUMN reviewed_by_email VARCHAR(150) DEFAULT NULL AFTER status'],
+        ['updated_at', 'ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at'],
+        ['resolved_at', 'ADD COLUMN resolved_at TIMESTAMP NULL DEFAULT NULL AFTER updated_at']
+      ];
+      for (const [col, ddl] of crAlters) {
+        if (!crNames.includes(col)) {
+          await pool.query(`ALTER TABLE customer_reports ${ddl}`);
+          console.log(`🌱 Added column ${col} to customer_reports.`);
+        }
+      }
+      console.log('🌱 Verified customer_reports table is online.');
+    } catch (reportErr) {
+      console.warn('⚠️ Table customer_reports creation failed:', reportErr.message);
+    }
+
     // Auto migration: create daily_chamber_temp_logs table if not exists
     try {
       await pool.query(`
@@ -240,6 +345,26 @@ async function testDbConnection() {
       console.log('🌱 Verified daily_chamber_temp_logs table is online.');
     } catch (chamberErr) {
       console.warn('⚠️ Table daily_chamber_temp_logs creation failed:', chamberErr.message);
+    }
+
+    // Auto migration: login lockout tracking (5 fails / 1h → 30 min lock)
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS login_security (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          email VARCHAR(150) NOT NULL,
+          role VARCHAR(50) DEFAULT NULL,
+          failed_count INT NOT NULL DEFAULT 0,
+          window_started_at DATETIME DEFAULT NULL,
+          last_failed_at DATETIME DEFAULT NULL,
+          locked_until DATETIME DEFAULT NULL,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uniq_login_security_email (email)
+        )
+      `);
+      console.log('🌱 Verified login_security table is online.');
+    } catch (loginSecErr) {
+      console.warn('⚠️ Table login_security creation failed:', loginSecErr.message);
     }
 
     // Log successful server startup process

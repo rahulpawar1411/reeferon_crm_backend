@@ -8,6 +8,7 @@
 
 const db = require('../config/db');
 const { logActivity } = require('../utils/logger');
+const { handleControllerError } = require('../utils/errorHandler');
 
 // 1. GET ALL OR USER-SPECIFIC PERMISSION REQUESTS
 exports.getPermissionRequests = async (req, res) => {
@@ -21,7 +22,7 @@ exports.getPermissionRequests = async (req, res) => {
                  WHEN a.action IN ('GRANT_PERMISSION', 'GRANT_DELETE') THEN 'Approved'
                  ELSE 'Denied'
                END AS status,
-               a.description, a.created_at,
+               a.description, a.created_at, a.do_action_completed_at,
                r.description AS request_description
         FROM do_operator_activities a
         LEFT JOIN do_operator_activities r ON r.operator_email = a.operator_email 
@@ -44,7 +45,7 @@ exports.getPermissionRequests = async (req, res) => {
                  WHEN a.action IN ('GRANT_PERMISSION', 'GRANT_DELETE') THEN 'Approved'
                  ELSE 'Denied'
                END AS status,
-               a.description, a.created_at,
+               a.description, a.created_at, a.do_action_completed_at,
                r.description AS request_description
         FROM do_operator_activities a
         LEFT JOIN do_operator_activities r ON r.operator_email = a.operator_email 
@@ -63,8 +64,11 @@ exports.getPermissionRequests = async (req, res) => {
     }
     return res.json(rows);
   } catch (err) {
-    console.error('Error fetching permission requests:', err);
-    return res.status(500).json({ error: 'Failed to fetch permission requests.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'getPermissionRequests',
+      req,
+      clientMessage: 'Failed to fetch permission requests.'
+    });
   }
 };
 
@@ -146,8 +150,11 @@ exports.createPermissionRequest = async (req, res) => {
       requestId: inserted[0] ? inserted[0].id : null
     });
   } catch (err) {
-    console.error('Error creating permission request:', err);
-    return res.status(500).json({ error: 'Failed to create permission request.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'createPermissionRequest',
+      req,
+      clientMessage: 'Failed to create permission request.'
+    });
   }
 };
 
@@ -183,9 +190,6 @@ exports.updatePermissionRequestStatus = async (req, res) => {
       targetAction = isEdit ? 'DENY_PERMISSION' : 'DENY_DELETE';
     }
 
-    const statusText = status === 'Approved' ? 'Granted' : 'Denied';
-    const verb = isEdit ? 'edit' : 'delete';
-    
     // Fetch target record's reference_no
     let approvalRefQuery = '';
     if (record_type === 'Chamber') {
@@ -203,20 +207,78 @@ exports.updatePermissionRequestStatus = async (req, res) => {
         approvalRefNo = approvalRefRows[0].reference_no;
       }
     }
-    const approvalRefText = approvalRefNo ? `Ref: ${approvalRefNo}` : `ID: ${record_id}`;
+    const approvalRefText = approvalRefNo ? approvalRefNo : `#${record_id}`;
+    const actionWord = isEdit ? 'Edit' : 'Delete';
+    const outcome = status === 'Approved' ? 'approved' : 'denied';
 
     await logActivity(
       operator_email,
       targetAction,
       record_type,
-      `Admin ${req.user.email} ${statusText.toLowerCase()} ${verb} permission on ${record_type} record (${approvalRefText})`,
+      `${actionWord} ${outcome} · ${approvalRefText}`,
       record_id
     );
 
     return res.json({ message: `Permission request ${status.toLowerCase()} successfully.` });
   } catch (err) {
-    console.error('Error updating permission request:', err);
-    return res.status(500).json({ error: 'Failed to update permission request.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'updatePermissionRequest',
+      req,
+      clientMessage: 'Failed to update permission request.'
+    });
+  }
+};
+
+// DO: mark notification handled (moves to Completed after Proceed / follow-up action)
+exports.markPermissionActionComplete = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const [rows] = await db.query(
+      `SELECT id, operator_email, action FROM do_operator_activities WHERE id = ? LIMIT 1`,
+      [id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Notification not found.' });
+    }
+
+    const row = rows[0];
+    const allowedActions = [
+      'REQUEST_EDIT',
+      'REQUEST_DELETE',
+      'GRANT_PERMISSION',
+      'GRANT_DELETE',
+      'DENY_PERMISSION',
+      'DENY_DELETE'
+    ];
+    if (!allowedActions.includes(row.action)) {
+      return res.status(400).json({ error: 'This activity cannot be marked complete.' });
+    }
+
+    if (req.user.role !== 'super_admin' && row.operator_email !== req.user.email) {
+      return res.status(403).json({ error: 'Not allowed to update this notification.' });
+    }
+
+    await db.query(
+      `UPDATE do_operator_activities SET do_action_completed_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [id]
+    );
+
+    const [updated] = await db.query(
+      `SELECT do_action_completed_at FROM do_operator_activities WHERE id = ? LIMIT 1`,
+      [id]
+    );
+
+    return res.json({
+      message: 'Notification moved to completed.',
+      do_action_completed_at: updated[0]?.do_action_completed_at || null
+    });
+  } catch (err) {
+    return handleControllerError(res, err, {
+      checkpoint: 'markPermissionActionComplete',
+      req,
+      clientMessage: 'Failed to mark notification complete.'
+    });
   }
 };
 
@@ -224,11 +286,22 @@ exports.updatePermissionRequestStatus = async (req, res) => {
 exports.checkPermission = async (req, res) => {
   try {
     const { record_type, record_id, action = 'Edit' } = req.query;
-    const operator_email = req.user.email;
 
     if (!record_type || !record_id) {
       return res.status(400).json({ error: 'Record type and record ID are required.' });
     }
+
+    // Super Admin never needs DO permission approval
+    if (req.user?.role === 'super_admin') {
+      return res.json({
+        approved: true,
+        status: 'Approved',
+        bypass: true,
+        role: 'super_admin'
+      });
+    }
+
+    const operator_email = req.user.email;
 
     // 1. Check system configuration settings first
     const configKey = `${record_type}_${action}`;
@@ -278,8 +351,11 @@ exports.checkPermission = async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('Error checking permission:', err);
-    return res.status(500).json({ error: 'Failed to check permission.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'checkPermission',
+      req,
+      clientMessage: 'Failed to check permission.'
+    });
   }
 };
 
@@ -312,8 +388,11 @@ exports.getSystemConfig = async (req, res) => {
 
     return res.json(config);
   } catch (err) {
-    console.error('Error fetching system config:', err);
-    return res.status(500).json({ error: 'Failed to fetch configuration.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'getSystemConfig',
+      req,
+      clientMessage: 'Failed to fetch configuration.'
+    });
   }
 };
 
@@ -344,7 +423,10 @@ exports.updateSystemConfig = async (req, res) => {
 
     return res.json({ message: 'Configuration updated successfully.' });
   } catch (err) {
-    console.error('Error updating system config:', err);
-    return res.status(500).json({ error: 'Failed to update configuration.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'updateSystemConfig',
+      req,
+      clientMessage: 'Failed to update configuration.'
+    });
   }
 };

@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "db:update": "node database/update_db.js",
+    "db:migrate-sub-admins": "node database/migrate_sub_admins.js"
   },
   "keywords": [
     "crm",
@@ -26,7 +28,8 @@
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
-    "mysql2": "^3.9.7"
+    "mysql2": "^3.9.7",
+    "resend": "^6.18.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"

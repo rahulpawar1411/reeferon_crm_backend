@@ -6,6 +6,8 @@
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const { logActivity } = require('../utils/logger');
+const { handleControllerError } = require('../utils/errorHandler');
+const { sendOperatorCredentialsEmail } = require('../utils/emailService');
 
 // 1. GET ALL OPERATORS
 exports.getOperators = async (req, res) => {
@@ -15,8 +17,11 @@ exports.getOperators = async (req, res) => {
     );
     return res.json(rows);
   } catch (err) {
-    console.error('Error fetching operators:', err);
-    return res.status(500).json({ error: 'Failed to fetch data operators.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'getOperators',
+      req,
+      clientMessage: 'Failed to fetch data operators.'
+    });
   }
 };
 
@@ -54,10 +59,45 @@ exports.createOperator = async (req, res) => {
       `Registered operator profile: ${email} (Warehouse: ${warehouse_name})`
     );
 
-    return res.status(201).json({ message: 'Data operator created successfully.' });
+    // Send login credentials to operator email (non-blocking for account creation)
+    const emailResult = await sendOperatorCredentialsEmail({
+      email: String(email).trim().toLowerCase(),
+      password,
+      full_name,
+      phone_no,
+      warehouse_name
+    });
+
+    if (emailResult.sent) {
+      await logActivity(
+        req.user?.email || 'super_admin',
+        'EMAIL_SENT',
+        'SECURITY',
+        `Credentials email sent to DO: ${email}`
+      );
+    } else {
+      await logActivity(
+        req.user?.email || 'super_admin',
+        'EMAIL_FAILED',
+        'SECURITY',
+        `Credentials email NOT sent to DO: ${email} (${emailResult.error || 'unknown'})`
+      );
+    }
+
+    return res.status(201).json({
+      message: emailResult.sent
+        ? 'Data operator created successfully. Login credentials emailed.'
+        : 'Data operator created successfully, but credentials email could not be sent.',
+      emailSent: !!emailResult.sent,
+      emailSkipped: !!emailResult.skipped,
+      emailError: emailResult.sent ? null : (emailResult.error || null)
+    });
   } catch (err) {
-    console.error('Error creating operator:', err);
-    return res.status(500).json({ error: 'Failed to create data operator.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'createOperator',
+      req,
+      clientMessage: 'Failed to create data operator.'
+    });
   }
 };
 
@@ -105,8 +145,11 @@ exports.updateOperator = async (req, res) => {
 
     return res.json({ message: 'Data operator updated successfully.' });
   } catch (err) {
-    console.error('Error updating operator:', err);
-    return res.status(500).json({ error: 'Failed to update data operator.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'updateOperator',
+      req,
+      clientMessage: 'Failed to update data operator.'
+    });
   }
 };
 
@@ -132,7 +175,10 @@ exports.deleteOperator = async (req, res) => {
 
     return res.json({ message: 'Data operator deleted successfully.' });
   } catch (err) {
-    console.error('Error deleting operator:', err);
-    return res.status(500).json({ error: 'Failed to delete data operator.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'deleteOperator',
+      req,
+      clientMessage: 'Failed to delete data operator.'
+    });
   }
 };

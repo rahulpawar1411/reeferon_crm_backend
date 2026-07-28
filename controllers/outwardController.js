@@ -6,8 +6,10 @@
 const db = require('../config/db');
 const fs = require('fs');
 const path = require('path');
-const { logActivity } = require('../utils/logger');
+const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
+const { parsePagination, sendPaginated, appendWarehouseFilter } = require('../utils/pagination');
+const { handleControllerError } = require('../utils/errorHandler');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -23,8 +25,10 @@ function formatDateTime(date) {
 
 // 1. GET ALL OUTWARD LOGS (With optional search query)
 exports.getOutwardLogs = async (req, res) => {
+  const { search } = req.query;
+  const { page, limit, offset } = parsePagination(req.query);
+
   try {
-    const { search } = req.query;
     let conditions = [];
     let params = [];
 
@@ -33,13 +37,52 @@ exports.getOutwardLogs = async (req, res) => {
       params.push(req.user.warehouse_name);
     }
 
-    if (search) {
-      conditions.push('(reference_no LIKE ? OR outward_vehicle_no LIKE ? OR outward_client_name LIKE ? OR outward_transporter_name LIKE ? OR outward_driver_name LIKE ?)');
-      const pattern = `%${search}%`;
-      params.push(pattern, pattern, pattern, pattern, pattern);
+    // Sub-Admin scoped filtering by allowed clients & warehouses
+    if (req.user && req.user.role === 'sub_admin') {
+      if (req.user.allowed_clients) {
+        const clients = req.user.allowed_clients.split(',').map(c => c.trim()).filter(Boolean);
+        if (clients.length > 0) {
+          const placeholders = clients.map(() => '?').join(', ');
+          conditions.push(`outward_client_name IN (${placeholders})`);
+          params.push(...clients);
+        }
+      }
+      if (req.user.allowed_warehouses) {
+        const warehouses = req.user.allowed_warehouses.split(',').map(w => w.trim()).filter(Boolean);
+        if (warehouses.length > 0) {
+          const placeholders = warehouses.map(() => '?').join(', ');
+          conditions.push(`(warehouse_name IN (${placeholders}) OR warehouse_name IS NULL)`);
+          params.push(...warehouses);
+        }
+      }
     }
 
+    if (search) {
+      conditions.push('(reference_no LIKE ? OR outward_vehicle_no LIKE ? OR outward_client_name LIKE ? OR outward_transporter_name LIKE ? OR outward_driver_name LIKE ? OR operator_email LIKE ?)');
+      const pattern = `%${search}%`;
+      params.push(pattern, pattern, pattern, pattern, pattern, pattern);
+    }
+
+    const { fromDate, toDate } = req.query;
+    if (fromDate) {
+      conditions.push('outward_entry_date >= ?');
+      params.push(fromDate);
+    }
+    if (toDate) {
+      conditions.push('outward_entry_date <= ?');
+      params.push(toDate);
+    }
+
+    appendWarehouseFilter(conditions, params, req.query, req.user);
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const [countRows] = await db.query(
+      `SELECT COUNT(*) AS total FROM outward_temp_logs ${whereClause}`,
+      params
+    );
+    const total = countRows[0]?.total ?? 0;
+
     const query = `
       SELECT outward_id, reference_no, DATE_FORMAT(outward_entry_date, '%Y-%m-%d') as outward_entry_date, outward_vehicle_no, outward_seal_no, 
              outward_vehicle_temp, outward_pre_vehicle_temp, outward_material_temp, outward_transporter_name, outward_driver_name, outward_driver_no, 
@@ -47,19 +90,23 @@ exports.getOutwardLogs = async (req, res) => {
              outward_loading_duration_hours, outward_loading_duration_mins, outward_loading_end_time, 
              outward_pallets_in_qty, outward_invoice_qty, outward_received_qty, outward_received_boxes_qty, 
              outward_short_received_boxes_qty, outward_excess_received_boxes_qty, outward_damage_received_boxes_qty, 
-             outward_material_type, outward_loading_supervisor_name, outward_remarks, outward_invoice_photos, outward_pod_photo, 
+             outward_material_type, outward_loading_supervisor_name, outward_remarks, outward_invoice_photos, outward_pod_photo,
              outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_pre_vehicle_temp_photo, outward_material_temp_photo, outward_vehicle_back_side_photo, 
-             outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, update_details, outward_created_at, outward_updated_at, warehouse_name, operator_email
+             outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, update_details, update_count, outward_created_at, outward_updated_at, warehouse_name, operator_email
       FROM outward_temp_logs 
       ${whereClause}
       ORDER BY outward_entry_date DESC, outward_id DESC
+      LIMIT ? OFFSET ?
     `;
 
-    const [rows] = await db.query(query, params);
-    return res.json(rows);
+    const [rows] = await db.query(query, [...params, limit, offset]);
+    return sendPaginated(res, rows, total, page, limit);
   } catch (err) {
-    console.error('Error fetching outward logs:', err);
-    return res.status(500).json({ error: 'Failed to fetch outward logs.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'getOutwardLogs',
+      req,
+      clientMessage: 'Failed to fetch outward logs.'
+    });
   }
 };
 
@@ -75,12 +122,23 @@ exports.addOutwardLog = async (req, res) => {
     }
     const outward_damage_boxes_photo = damage_photos_list.length > 0 ? damage_photos_list.join(',') : null;
 
+    let invoice_photos_list = [];
+    if (files.outward_invoice_photos) {
+      invoice_photos_list = files.outward_invoice_photos.map(f => `uploads/outward_images/${f.filename}`);
+    }
+    const outward_invoice_photos = invoice_photos_list.length > 0 ? invoice_photos_list.join(',') : null;
+
+    let count_sheet_list = [];
+    if (files.outward_count_sheet_photo) {
+      count_sheet_list = files.outward_count_sheet_photo.map(f => `uploads/outward_images/${f.filename}`);
+    }
+    const outward_count_sheet_photo = count_sheet_list.length > 0 ? count_sheet_list.join(',') : null;
+
     // Single photos mapping
     const getPhotoPath = (fieldName) => {
       return files[fieldName] ? `uploads/outward_images/${files[fieldName][0].filename}` : null;
     };
 
-    const outward_invoice_photos = getPhotoPath('outward_invoice_photos');
     const outward_pod_photo = getPhotoPath('outward_pod_photo');
     const outward_vehicle_seal_photo = getPhotoPath('outward_vehicle_seal_photo');
     const outward_pre_vehicle_temp_photo = getPhotoPath('outward_pre_vehicle_temp_photo') || getPhotoPath('outward_vehicle_temp_photo');
@@ -88,7 +146,6 @@ exports.addOutwardLog = async (req, res) => {
     const outward_material_temp_photo = getPhotoPath('outward_material_temp_photo');
     const outward_vehicle_back_side_photo = getPhotoPath('outward_vehicle_back_side_photo');
     const outward_vehicle_back_side_photo_with_material = getPhotoPath('outward_vehicle_back_side_photo_with_material');
-    const outward_count_sheet_photo = getPhotoPath('outward_count_sheet_photo');
 
     // Required fields check
     if (!data.outward_entry_date || !data.outward_vehicle_no || !data.outward_client_name) {
@@ -210,13 +267,16 @@ exports.addOutwardLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'CREATE',
       'Outward Log',
-      `Created Outward record for vehicle ${data.outward_vehicle_no} and client ${data.outward_client_name} (Ref: ${reference_no})`
+      `${await getActorLabel(req.user)} created Outward record (Ref: ${reference_no}) — vehicle ${data.outward_vehicle_no || '-'}, client ${data.outward_client_name || '-'}`
     );
 
     return res.status(201).json({ id: insertId, reference_no, message: 'Outward temperature record saved successfully.' });
   } catch (err) {
-    console.error('Error creating outward log:', err);
-    return res.status(500).json({ error: 'Failed to save outward log.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'addOutwardLog',
+      req,
+      clientMessage: 'Failed to save outward log.'
+    });
   }
 };
 
@@ -225,10 +285,12 @@ exports.deleteOutwardLog = async (req, res) => {
   try {
     const { id } = req.params;
     
-    // First retrieve file paths to clean up disk storage
+    // First retrieve metadata + file paths to clean up disk storage
     const [rows] = await db.query(`
-      SELECT outward_invoice_photos, outward_pod_photo, outward_vehicle_seal_photo, outward_vehicle_temp_photo, 
-             outward_material_temp_photo, outward_vehicle_back_side_photo, outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo 
+      SELECT reference_no, outward_vehicle_no, outward_client_name,
+             outward_invoice_photos, outward_pod_photo, outward_vehicle_seal_photo, outward_vehicle_temp_photo, 
+             outward_material_temp_photo, outward_vehicle_back_side_photo, outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo,
+             outward_pre_vehicle_temp_photo
       FROM outward_temp_logs WHERE outward_id = ?
     `, [id]);
 
@@ -237,6 +299,9 @@ exports.deleteOutwardLog = async (req, res) => {
     }
 
     const record = rows[0];
+    const refNo = record.reference_no || `RF-OUT-26-${String(id).padStart(4, '0')}`;
+    const vehicleNo = record.outward_vehicle_no || '-';
+    const clientName = record.outward_client_name || '-';
 
     // Delete record from database
     await db.query('DELETE FROM outward_temp_logs WHERE outward_id = ?', [id]);
@@ -252,13 +317,18 @@ exports.deleteOutwardLog = async (req, res) => {
       }
     };
 
-    // Clean up multiple damage photos
+    // Clean up multiple photos
     if (record.outward_damage_boxes_photo) {
       record.outward_damage_boxes_photo.split(',').forEach(cleanupFile);
     }
+    if (record.outward_invoice_photos) {
+      record.outward_invoice_photos.split(',').forEach(cleanupFile);
+    }
+    if (record.outward_count_sheet_photo) {
+      record.outward_count_sheet_photo.split(',').forEach(cleanupFile);
+    }
     
     // Clean up single photos
-    cleanupFile(record.outward_invoice_photos);
     cleanupFile(record.outward_pod_photo);
     cleanupFile(record.outward_vehicle_seal_photo);
     cleanupFile(record.outward_vehicle_temp_photo);
@@ -268,20 +338,22 @@ exports.deleteOutwardLog = async (req, res) => {
     cleanupFile(record.outward_material_temp_photo);
     cleanupFile(record.outward_vehicle_back_side_photo);
     cleanupFile(record.outward_vehicle_back_side_photo_with_material);
-    cleanupFile(record.outward_count_sheet_photo);
 
     // Log Operator Activity
     await logActivity(
       req.user ? req.user.email : 'unknown',
       'DELETE',
       'Outward Log',
-      `Deleted Outward record ID #${id} for vehicle ${record.outward_vehicle_no} and client ${record.outward_client_name}`
+      `${await getActorLabel(req.user)} deleted Outward record (Ref: ${refNo}) — vehicle ${vehicleNo}, client ${clientName}`
     );
 
     return res.json({ message: 'Record deleted and related files cleaned up.' });
   } catch (err) {
-    console.error('Error deleting outward log:', err);
-    return res.status(500).json({ error: 'Failed to delete record.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'deleteOutwardLog',
+      req,
+      clientMessage: 'Failed to delete record.'
+    });
   }
 };
 
@@ -304,7 +376,6 @@ exports.updateOutwardLog = async (req, res) => {
       return files[fieldName] ? `uploads/outward_images/${files[fieldName][0].filename}` : fallbackValue;
     };
 
-    const outward_invoice_photos = getPhotoPath('outward_invoice_photos', current.outward_invoice_photos);
     const outward_pod_photo = getPhotoPath('outward_pod_photo', current.outward_pod_photo);
     const outward_vehicle_seal_photo = getPhotoPath('outward_vehicle_seal_photo', current.outward_vehicle_seal_photo);
     const outward_pre_vehicle_temp_photo = getPhotoPath('outward_pre_vehicle_temp_photo', current.outward_pre_vehicle_temp_photo) || getPhotoPath('outward_vehicle_temp_photo', current.outward_vehicle_temp_photo);
@@ -312,7 +383,18 @@ exports.updateOutwardLog = async (req, res) => {
     const outward_material_temp_photo = getPhotoPath('outward_material_temp_photo', current.outward_material_temp_photo);
     const outward_vehicle_back_side_photo = getPhotoPath('outward_vehicle_back_side_photo', current.outward_vehicle_back_side_photo);
     const outward_vehicle_back_side_photo_with_material = getPhotoPath('outward_vehicle_back_side_photo_with_material', current.outward_vehicle_back_side_photo_with_material);
-    const outward_count_sheet_photo = getPhotoPath('outward_count_sheet_photo', current.outward_count_sheet_photo);
+
+    let outward_invoice_photos = current.outward_invoice_photos;
+    if (files.outward_invoice_photos) {
+      const invoice_photos_list = files.outward_invoice_photos.map(f => `uploads/outward_images/${f.filename}`);
+      outward_invoice_photos = invoice_photos_list.join(',');
+    }
+
+    let outward_count_sheet_photo = current.outward_count_sheet_photo;
+    if (files.outward_count_sheet_photo) {
+      const count_sheet_list = files.outward_count_sheet_photo.map(f => `uploads/outward_images/${f.filename}`);
+      outward_count_sheet_photo = count_sheet_list.join(',');
+    }
 
     let outward_damage_boxes_photo = current.outward_damage_boxes_photo;
     if (files.outward_damage_boxes_photo) {
@@ -360,6 +442,7 @@ exports.updateOutwardLog = async (req, res) => {
         outward_count_sheet_photo = ?,
         outward_damage_boxes_photo = ?,
         update_details = ?,
+        update_count = ?,
         outward_updated_at = ?
       WHERE outward_id = ?
     `;
@@ -489,6 +572,7 @@ exports.updateOutwardLog = async (req, res) => {
     };
 
     const update_details = buildDiffString(current, updatedValues, outwardFieldMapping);
+    const update_count = (parseInt(current.update_count, 10) || 0) + 1;
 
     const values = [
       data.outward_entry_date,
@@ -528,23 +612,100 @@ exports.updateOutwardLog = async (req, res) => {
       outward_count_sheet_photo,
       outward_damage_boxes_photo,
       update_details || null,
+      update_count,
       localTimestamp,
       id
     ];
 
     await db.query(query, values);
     
-    // Log Operator Activity
+    // Log Operator Activity (includes Super Admin / Sub Admin / DO updates)
+    const refNo = current.reference_no || `RF-OUT-26-${String(id).padStart(4, '0')}`;
+    const vehicleNo = data.outward_vehicle_no || current.outward_vehicle_no || '-';
     await logActivity(
       req.user ? req.user.email : 'unknown',
       'UPDATE',
       'Outward Log',
-      `Updated Outward record ID #${id} (Ref: ${current.reference_no}) for vehicle ${data.outward_vehicle_no || current.outward_vehicle_no}${update_details ? `. Changes: ${update_details}` : ''}`
+      `${await getActorLabel(req.user)} updated Outward record (Ref: ${refNo}) — vehicle ${vehicleNo}${update_details ? `. Changes: ${update_details}` : ''}`
     );
 
-    return res.json({ message: 'Outward temperature record updated successfully.' });
+    return res.json({ message: 'Outward temperature record updated successfully.', update_count });
   } catch (err) {
-    console.error('Error updating outward log:', err);
-    return res.status(500).json({ error: 'Failed to update outward log.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'updateOutwardLog',
+      req,
+      clientMessage: 'Failed to update outward log.'
+    });
+  }
+};
+
+/**
+ * POD-only update — DO can replace POD photo from profile without admin edit permission.
+ */
+exports.updateOutwardPodPhoto = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const uploaded = req.file || (req.files && req.files.outward_pod_photo && req.files.outward_pod_photo[0]);
+
+    if (!uploaded) {
+      return res.status(400).json({ error: 'POD photo file is required.' });
+    }
+
+    const [existing] = await db.query(
+      'SELECT outward_id, reference_no, outward_vehicle_no, outward_pod_photo, update_details, update_count FROM outward_temp_logs WHERE outward_id = ?',
+      [id]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Record not found.' });
+    }
+
+    const current = existing[0];
+    const newPath = `uploads/outward_images/${uploaded.filename}`;
+    const localTimestamp = formatDateTime(new Date());
+    const podDiff = current.outward_pod_photo
+      ? 'POD Photo: (previous file) → (new file)'
+      : 'POD Photo: (empty) → (new file)';
+    let update_details = current.update_details
+      ? `${current.update_details} | ${podDiff}`
+      : podDiff;
+    if (update_details && update_details.length > 60000) {
+      update_details = update_details.slice(-60000);
+    }
+    const update_count = (parseInt(current.update_count, 10) || 0) + 1;
+
+    await db.query(
+      `UPDATE outward_temp_logs
+       SET outward_pod_photo = ?, update_details = ?, update_count = ?, outward_updated_at = ?
+       WHERE outward_id = ?`,
+      [newPath, update_details, update_count, localTimestamp, id]
+    );
+
+    if (current.outward_pod_photo && current.outward_pod_photo !== newPath) {
+      const oldFull = path.join(__dirname, '../', current.outward_pod_photo);
+      if (fs.existsSync(oldFull)) {
+        fs.unlink(oldFull, () => {});
+      }
+    }
+
+    await logActivity(
+      req.user ? req.user.email : 'unknown',
+      'UPDATE',
+      'Outward Log',
+      `${await getActorLabel(req.user)} updated POD Photo for Outward record (Ref: ${current.reference_no || `RF-OUT-26-${String(id).padStart(4, '0')}`}) — vehicle ${current.outward_vehicle_no || '-'}`
+    );
+
+    return res.json({
+      message: 'POD photo updated successfully.',
+      outward_pod_photo: newPath,
+      update_details,
+      update_count,
+      outward_updated_at: localTimestamp
+    });
+  } catch (err) {
+    return handleControllerError(res, err, {
+      checkpoint: 'updateOutwardPodPhoto',
+      req,
+      clientMessage: err.message || 'Failed to update POD photo.'
+    });
   }
 };

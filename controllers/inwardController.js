@@ -6,8 +6,10 @@
 const db = require('../config/db');
 const fs = require('fs');
 const path = require('path');
-const { logActivity } = require('../utils/logger');
+const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
+const { parsePagination, sendPaginated, appendWarehouseFilter } = require('../utils/pagination');
+const { handleControllerError } = require('../utils/errorHandler');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -23,8 +25,10 @@ function formatDateTime(date) {
 
 // 1. GET ALL INWARD LOGS (With optional search query)
 exports.getInwardLogs = async (req, res) => {
+  const { search } = req.query;
+  const { page, limit, offset } = parsePagination(req.query);
+
   try {
-    const { search } = req.query;
     let conditions = [];
     let params = [];
 
@@ -33,13 +37,52 @@ exports.getInwardLogs = async (req, res) => {
       params.push(req.user.warehouse_name);
     }
 
-    if (search) {
-      conditions.push('(reference_no LIKE ? OR inward_vehicle_no LIKE ? OR inward_client_name LIKE ? OR inward_transporter_name LIKE ? OR inward_driver_name LIKE ?)');
-      const pattern = `%${search}%`;
-      params.push(pattern, pattern, pattern, pattern, pattern);
+    // Sub-Admin scoped filtering by allowed clients & warehouses
+    if (req.user && req.user.role === 'sub_admin') {
+      if (req.user.allowed_clients) {
+        const clients = req.user.allowed_clients.split(',').map(c => c.trim()).filter(Boolean);
+        if (clients.length > 0) {
+          const placeholders = clients.map(() => '?').join(', ');
+          conditions.push(`inward_client_name IN (${placeholders})`);
+          params.push(...clients);
+        }
+      }
+      if (req.user.allowed_warehouses) {
+        const warehouses = req.user.allowed_warehouses.split(',').map(w => w.trim()).filter(Boolean);
+        if (warehouses.length > 0) {
+          const placeholders = warehouses.map(() => '?').join(', ');
+          conditions.push(`(warehouse_name IN (${placeholders}) OR warehouse_name IS NULL)`);
+          params.push(...warehouses);
+        }
+      }
     }
 
+    if (search) {
+      conditions.push('(reference_no LIKE ? OR inward_vehicle_no LIKE ? OR inward_client_name LIKE ? OR inward_transporter_name LIKE ? OR inward_driver_name LIKE ? OR operator_email LIKE ?)');
+      const pattern = `%${search}%`;
+      params.push(pattern, pattern, pattern, pattern, pattern, pattern);
+    }
+
+    const { fromDate, toDate } = req.query;
+    if (fromDate) {
+      conditions.push('inward_entry_date >= ?');
+      params.push(fromDate);
+    }
+    if (toDate) {
+      conditions.push('inward_entry_date <= ?');
+      params.push(toDate);
+    }
+
+    appendWarehouseFilter(conditions, params, req.query, req.user);
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const [countRows] = await db.query(
+      `SELECT COUNT(*) AS total FROM inward_temp_logs ${whereClause}`,
+      params
+    );
+    const total = countRows[0]?.total ?? 0;
+
     const query = `
       SELECT inward_id, reference_no, DATE_FORMAT(inward_entry_date, '%Y-%m-%d') as inward_entry_date, inward_vehicle_no, inward_seal_no, 
              inward_vehicle_temp, inward_material_temp, inward_transporter_name, inward_driver_name, inward_driver_no, 
@@ -47,19 +90,23 @@ exports.getInwardLogs = async (req, res) => {
              inward_unloading_duration_hours, inward_unloading_duration_mins, inward_unloading_end_time, 
              inward_pallets_in_qty, inward_invoice_qty, inward_received_qty, inward_received_boxes_qty, 
              inward_short_received_boxes_qty, inward_excess_received_boxes_qty, inward_damage_received_boxes_qty, 
-             inward_material_type, inward_unloading_supervisor_name, inward_remarks, inward_invoice_photos, inward_pod_photo, 
+             inward_material_type, inward_unloading_supervisor_name, inward_remarks, inward_invoice_photos, inward_pod_photo,
              inward_vehicle_seal_photo, inward_vehicle_temp_photo, inward_material_temp_photo, inward_vehicle_back_side_photo, 
-             inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo, update_details, inward_created_at, inward_updated_at, warehouse_name, operator_email
+             inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo, update_details, update_count, inward_created_at, inward_updated_at, warehouse_name, operator_email
       FROM inward_temp_logs 
       ${whereClause}
       ORDER BY inward_entry_date DESC, inward_id DESC
+      LIMIT ? OFFSET ?
     `;
 
-    const [rows] = await db.query(query, params);
-    return res.json(rows);
+    const [rows] = await db.query(query, [...params, limit, offset]);
+    return sendPaginated(res, rows, total, page, limit);
   } catch (err) {
-    console.error('Error fetching inward logs:', err);
-    return res.status(500).json({ error: 'Failed to fetch inward logs.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'getInwardLogs',
+      req,
+      clientMessage: 'Failed to fetch inward logs.'
+    });
   }
 };
 
@@ -75,19 +122,29 @@ exports.addInwardLog = async (req, res) => {
     }
     const inward_damage_boxes_photo = damage_photos_list.length > 0 ? damage_photos_list.join(',') : null;
 
+    let invoice_photos_list = [];
+    if (files.inward_invoice_photos) {
+      invoice_photos_list = files.inward_invoice_photos.map(f => `uploads/inward_images/${f.filename}`);
+    }
+    const inward_invoice_photos = invoice_photos_list.length > 0 ? invoice_photos_list.join(',') : null;
+
+    let count_sheet_list = [];
+    if (files.inward_count_sheet_photo) {
+      count_sheet_list = files.inward_count_sheet_photo.map(f => `uploads/inward_images/${f.filename}`);
+    }
+    const inward_count_sheet_photo = count_sheet_list.length > 0 ? count_sheet_list.join(',') : null;
+
     // Single photos mapping
     const getPhotoPath = (fieldName) => {
       return files[fieldName] ? `uploads/inward_images/${files[fieldName][0].filename}` : null;
     };
 
-    const inward_invoice_photos = getPhotoPath('inward_invoice_photos');
     const inward_pod_photo = getPhotoPath('inward_pod_photo');
     const inward_vehicle_seal_photo = getPhotoPath('inward_vehicle_seal_photo');
     const inward_vehicle_temp_photo = getPhotoPath('inward_vehicle_temp_photo');
     const inward_material_temp_photo = getPhotoPath('inward_material_temp_photo');
     const inward_vehicle_back_side_photo = getPhotoPath('inward_vehicle_back_side_photo');
     const inward_vehicle_back_side_photo_with_material = getPhotoPath('inward_vehicle_back_side_photo_with_material');
-    const inward_count_sheet_photo = getPhotoPath('inward_count_sheet_photo');
 
     // Required fields check
     if (!data.inward_entry_date || !data.inward_vehicle_no || !data.inward_client_name) {
@@ -203,13 +260,16 @@ exports.addInwardLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'CREATE',
       'Inward Log',
-      `Created Inward record for vehicle ${data.inward_vehicle_no} and client ${data.inward_client_name} (Ref: ${reference_no})`
+      `${await getActorLabel(req.user)} created Inward record (Ref: ${reference_no}) — vehicle ${data.inward_vehicle_no || '-'}, client ${data.inward_client_name || '-'}`
     );
 
     return res.status(201).json({ id: insertId, reference_no, message: 'Inward temperature record saved successfully.' });
   } catch (err) {
-    console.error('Error creating inward log:', err);
-    return res.status(500).json({ error: 'Failed to save inward log.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'addInwardLog',
+      req,
+      clientMessage: 'Failed to save inward log.'
+    });
   }
 };
 
@@ -218,9 +278,10 @@ exports.deleteInwardLog = async (req, res) => {
   try {
     const { id } = req.params;
     
-    // First retrieve file paths to clean up disk storage
+    // First retrieve metadata + file paths to clean up disk storage
     const [rows] = await db.query(`
-      SELECT inward_invoice_photos, inward_pod_photo, inward_vehicle_seal_photo, inward_vehicle_temp_photo, 
+      SELECT reference_no, inward_vehicle_no, inward_client_name,
+             inward_invoice_photos, inward_pod_photo, inward_vehicle_seal_photo, inward_vehicle_temp_photo, 
              inward_material_temp_photo, inward_vehicle_back_side_photo, inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo 
       FROM inward_temp_logs WHERE inward_id = ?
     `, [id]);
@@ -230,6 +291,9 @@ exports.deleteInwardLog = async (req, res) => {
     }
 
     const record = rows[0];
+    const refNo = record.reference_no || `RF-IN-26-${String(id).padStart(4, '0')}`;
+    const vehicleNo = record.inward_vehicle_no || '-';
+    const clientName = record.inward_client_name || '-';
 
     // Delete record from database
     await db.query('DELETE FROM inward_temp_logs WHERE inward_id = ?', [id]);
@@ -245,33 +309,40 @@ exports.deleteInwardLog = async (req, res) => {
       }
     };
 
-    // Clean up multiple damage photos
+    // Clean up multiple photos
     if (record.inward_damage_boxes_photo) {
       record.inward_damage_boxes_photo.split(',').forEach(cleanupFile);
     }
+    if (record.inward_invoice_photos) {
+      record.inward_invoice_photos.split(',').forEach(cleanupFile);
+    }
+    if (record.inward_count_sheet_photo) {
+      record.inward_count_sheet_photo.split(',').forEach(cleanupFile);
+    }
     
     // Clean up single photos
-    cleanupFile(record.inward_invoice_photos);
     cleanupFile(record.inward_pod_photo);
     cleanupFile(record.inward_vehicle_seal_photo);
     cleanupFile(record.inward_vehicle_temp_photo);
     cleanupFile(record.inward_material_temp_photo);
     cleanupFile(record.inward_vehicle_back_side_photo);
     cleanupFile(record.inward_vehicle_back_side_photo_with_material);
-    cleanupFile(record.inward_count_sheet_photo);
 
     // Log Operator Activity
     await logActivity(
       req.user ? req.user.email : 'unknown',
       'DELETE',
       'Inward Log',
-      `Deleted Inward record ID #${id} for vehicle ${record.inward_vehicle_no} and client ${record.inward_client_name}`
+      `${await getActorLabel(req.user)} deleted Inward record (Ref: ${refNo}) — vehicle ${vehicleNo}, client ${clientName}`
     );
 
     return res.json({ message: 'Record deleted and related files cleaned up.' });
   } catch (err) {
-    console.error('Error deleting inward log:', err);
-    return res.status(500).json({ error: 'Failed to delete record.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'deleteInwardLog',
+      req,
+      clientMessage: 'Failed to delete record.'
+    });
   }
 };
 
@@ -294,14 +365,22 @@ exports.updateInwardLog = async (req, res) => {
       return files[fieldName] ? `uploads/inward_images/${files[fieldName][0].filename}` : fallbackValue;
     };
 
-    const inward_invoice_photos = getPhotoPath('inward_invoice_photos', current.inward_invoice_photos);
     const inward_pod_photo = getPhotoPath('inward_pod_photo', current.inward_pod_photo);
     const inward_vehicle_seal_photo = getPhotoPath('inward_vehicle_seal_photo', current.inward_vehicle_seal_photo);
     const inward_vehicle_temp_photo = getPhotoPath('inward_vehicle_temp_photo', current.inward_vehicle_temp_photo);
     const inward_material_temp_photo = getPhotoPath('inward_material_temp_photo', current.inward_material_temp_photo);
     const inward_vehicle_back_side_photo = getPhotoPath('inward_vehicle_back_side_photo', current.inward_vehicle_back_side_photo);
     const inward_vehicle_back_side_photo_with_material = getPhotoPath('inward_vehicle_back_side_photo_with_material', current.inward_vehicle_back_side_photo_with_material);
-    const inward_count_sheet_photo = getPhotoPath('inward_count_sheet_photo', current.inward_count_sheet_photo);
+
+    let inward_invoice_photos = current.inward_invoice_photos;
+    if (files.inward_invoice_photos) {
+      inward_invoice_photos = files.inward_invoice_photos.map(f => `uploads/inward_images/${f.filename}`).join(',');
+    }
+
+    let inward_count_sheet_photo = current.inward_count_sheet_photo;
+    if (files.inward_count_sheet_photo) {
+      inward_count_sheet_photo = files.inward_count_sheet_photo.map(f => `uploads/inward_images/${f.filename}`).join(',');
+    }
 
     let inward_damage_boxes_photo = current.inward_damage_boxes_photo;
     if (files.inward_damage_boxes_photo) {
@@ -347,6 +426,7 @@ exports.updateInwardLog = async (req, res) => {
         inward_count_sheet_photo = ?,
         inward_damage_boxes_photo = ?,
         update_details = ?,
+        update_count = ?,
         inward_updated_at = ?
       WHERE inward_id = ?
     `;
@@ -468,6 +548,7 @@ exports.updateInwardLog = async (req, res) => {
     };
 
     const update_details = buildDiffString(current, updatedValues, inwardFieldMapping);
+    const update_count = (parseInt(current.update_count, 10) || 0) + 1;
 
     const values = [
       data.inward_entry_date,
@@ -505,23 +586,100 @@ exports.updateInwardLog = async (req, res) => {
       inward_count_sheet_photo,
       inward_damage_boxes_photo,
       update_details || null,
+      update_count,
       localTimestamp,
       id
     ];
 
     await db.query(query, values);
     
-    // Log Operator Activity
+    // Log Operator Activity (includes Super Admin / Sub Admin / DO updates)
+    const refNo = current.reference_no || `RF-IN-26-${String(id).padStart(4, '0')}`;
+    const vehicleNo = data.inward_vehicle_no || current.inward_vehicle_no || '-';
     await logActivity(
       req.user ? req.user.email : 'unknown',
       'UPDATE',
       'Inward Log',
-      `Updated Inward record ID #${id} (Ref: ${current.reference_no}) for vehicle ${data.inward_vehicle_no || current.inward_vehicle_no}${update_details ? `. Changes: ${update_details}` : ''}`
+      `${await getActorLabel(req.user)} updated Inward record (Ref: ${refNo}) — vehicle ${vehicleNo}${update_details ? `. Changes: ${update_details}` : ''}`
     );
 
-    return res.json({ message: 'Inward temperature record updated successfully.' });
+    return res.json({ message: 'Inward temperature record updated successfully.', update_count });
   } catch (err) {
-    console.error('Error updating inward log:', err);
-    return res.status(500).json({ error: 'Failed to update inward log.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'updateInwardLog',
+      req,
+      clientMessage: 'Failed to update inward log.'
+    });
+  }
+};
+
+/**
+ * POD-only update — DO can replace POD photo from profile without admin edit permission.
+ */
+exports.updateInwardPodPhoto = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const uploaded = req.file || (req.files && req.files.inward_pod_photo && req.files.inward_pod_photo[0]);
+
+    if (!uploaded) {
+      return res.status(400).json({ error: 'POD photo file is required.' });
+    }
+
+    const [existing] = await db.query(
+      'SELECT inward_id, reference_no, inward_vehicle_no, inward_pod_photo, update_details, update_count FROM inward_temp_logs WHERE inward_id = ?',
+      [id]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Record not found.' });
+    }
+
+    const current = existing[0];
+    const newPath = `uploads/inward_images/${uploaded.filename}`;
+    const localTimestamp = formatDateTime(new Date());
+    const podDiff = current.inward_pod_photo
+      ? 'POD Photo: (previous file) → (new file)'
+      : 'POD Photo: (empty) → (new file)';
+    let update_details = current.update_details
+      ? `${current.update_details} | ${podDiff}`
+      : podDiff;
+    if (update_details && update_details.length > 60000) {
+      update_details = update_details.slice(-60000);
+    }
+    const update_count = (parseInt(current.update_count, 10) || 0) + 1;
+
+    await db.query(
+      `UPDATE inward_temp_logs
+       SET inward_pod_photo = ?, update_details = ?, update_count = ?, inward_updated_at = ?
+       WHERE inward_id = ?`,
+      [newPath, update_details, update_count, localTimestamp, id]
+    );
+
+    if (current.inward_pod_photo && current.inward_pod_photo !== newPath) {
+      const oldFull = path.join(__dirname, '../', current.inward_pod_photo);
+      if (fs.existsSync(oldFull)) {
+        fs.unlink(oldFull, () => {});
+      }
+    }
+
+    await logActivity(
+      req.user ? req.user.email : 'unknown',
+      'UPDATE',
+      'Inward Log',
+      `${await getActorLabel(req.user)} updated POD Photo for Inward record (Ref: ${current.reference_no || `RF-IN-26-${String(id).padStart(4, '0')}`}) — vehicle ${current.inward_vehicle_no || '-'}`
+    );
+
+    return res.json({
+      message: 'POD photo updated successfully.',
+      inward_pod_photo: newPath,
+      update_details,
+      update_count,
+      inward_updated_at: localTimestamp
+    });
+  } catch (err) {
+    return handleControllerError(res, err, {
+      checkpoint: 'updateInwardPodPhoto',
+      req,
+      clientMessage: err.message || 'Failed to update POD photo.'
+    });
   }
 };

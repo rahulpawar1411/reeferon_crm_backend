@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { handleControllerError } = require('../utils/errorHandler');
 
 exports.getActivityLogs = async (req, res) => {
   try {
@@ -7,7 +8,10 @@ exports.getActivityLogs = async (req, res) => {
     );
     return res.json(rows);
   } catch (err) {
-    console.error('Error fetching activity logs:', err);
-    return res.status(500).json({ error: 'Failed to fetch operator activity logs.' });
+    return handleControllerError(res, err, {
+      checkpoint: 'getActivityLogs',
+      req,
+      clientMessage: 'Failed to fetch operator activity logs.'
+    });
   }
 };

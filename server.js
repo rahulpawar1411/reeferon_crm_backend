@@ -11,18 +11,28 @@ const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
+const {
+  enableQuietConsole,
+  serverRunning,
+  statusLine,
+  errorLine
+} = require('./utils/quietConsole');
+
+// Quiet terminal: only server running + errors + status codes
+enableQuietConsole();
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Security Header Protection (Helmet)
 app.use(helmet({
-  contentSecurityPolicy: false, // Disabled in dev/test to allow local image/font loading easily
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false
 }));
 
 // CORS Configuration with Credentials Support (Required for HttpOnly Cookies)
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000'], // Allowed frontend origins
+  origin: ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000'],
   credentials: true
 }));
 
@@ -30,43 +40,51 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(cookieParser());
 
+// Compact HTTP status log (4xx/5xx always; all statuses if LOG_ALL_STATUS=1)
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    const code = res.statusCode;
+    const logAll = process.env.LOG_ALL_STATUS === '1';
+    if (logAll || code >= 400) {
+      statusLine(req.method, req.originalUrl, code);
+    }
+  });
+  next();
+});
+
 // Response Interceptor Middleware to log system/database errors to the DB automatically
 app.use((req, res, next) => {
   const originalJson = res.json;
-  const originalSend = res.send;
 
   res.json = function (body) {
-    if (res.statusCode >= 500) {
-      const { logActivity } = require('./utils/logger');
-      const email = req.user?.email || 'system';
+    if (res.statusCode >= 500 && !(res.locals && res.locals.errorCheckpointLogged)) {
+      const { logErrorCheckpoint } = require('./utils/errorHandler');
       const errMsg = body?.error || body?.message || JSON.stringify(body) || 'Unknown error';
-      logActivity(email, 'SYSTEM_ERROR', 'ERROR', `Error on ${req.method} ${req.originalUrl}: ${errMsg}`).catch(err => {
-        console.error('Failed to log error response:', err);
+      const synthetic = new Error(typeof errMsg === 'string' ? errMsg : 'Unknown server error');
+      synthetic.name = body?.checkpoint?.type || 'HttpError';
+      synthetic.statusCode = res.statusCode;
+      logErrorCheckpoint(synthetic, {
+        checkpoint: body?.checkpoint?.checkpoint || 'httpResponseInterceptor',
+        statusCode: res.statusCode,
+        method: req.method,
+        url: req.originalUrl,
+        email: req.user?.email || 'system',
+        file: body?.checkpoint?.file || null,
+        line: body?.checkpoint?.line || null
+      }).catch((err) => {
+        errorLine('Failed to log error response checkpoint:', err?.message || err);
       });
     }
     return originalJson.apply(this, arguments);
   };
 
-  res.send = function (body) {
-    if (res.statusCode >= 500) {
-      const { logActivity } = require('./utils/logger');
-      const email = req.user?.email || 'system';
-      const errMsg = typeof body === 'string' ? body : JSON.stringify(body);
-      logActivity(email, 'SYSTEM_ERROR', 'ERROR', `Error on ${req.method} ${req.originalUrl}: ${errMsg.substring(0, 500)}`).catch(err => {
-        console.error('Failed to log error response:', err);
-      });
-    }
-    return originalSend.apply(this, arguments);
-  };
-
   next();
 });
 
-
 // Rate Limiter for Login Endpoint (Brute-force protection)
 const loginRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes window
-  max: 15, // Limit each IP to 15 login attempts per window
+  windowMs: 15 * 60 * 1000,
+  max: 15,
   message: {
     success: false,
     message: 'Too many login attempts from this IP. Please try again after 15 minutes.'
@@ -75,16 +93,11 @@ const loginRateLimiter = rateLimit({
   legacyHeaders: false
 });
 
-// Serve Uploads directory statically
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// Serve static built frontend files
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
 
-// Import Middlewares
 const { verifyToken, requireRole } = require('./middleware/auth');
 
-// Import Routes
 const authRoutes = require('./routes/authRoutes');
 const leadRoutes = require('./routes/leadRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
@@ -97,11 +110,9 @@ const subAdminRoutes = require('./routes/subAdminRoutes');
 const activityRoutes = require('./routes/activityRoutes');
 const permissionRoutes = require('./routes/permissionRoutes');
 
-// Mount Authentication Routes with Limiter on Login
+app.use('/api/auth/login', loginRateLimiter);
 app.use('/api/auth', authRoutes);
-app.post('/api/auth/login', loginRateLimiter); // Apply limiter specifically to login
 
-// Protected Operational Routes (Role-Based Authorization)
 app.use('/api/leads', verifyToken, requireRole(['super_admin', 'sub_admin']), leadRoutes);
 app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'sub_admin']), dashboardRoutes);
 app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'sub_admin', 'do_operator']), tempRoutes);
@@ -112,13 +123,17 @@ app.use('/api/do-operators', verifyToken, requireRole(['super_admin']), operator
 app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), subAdminRoutes);
 app.use('/api/operator-activities', verifyToken, requireRole(['super_admin']), activityRoutes);
 app.use('/api/permission-requests', permissionRoutes);
+app.use(
+  '/api/customer-reports',
+  verifyToken,
+  requireRole(['sub_admin', 'super_admin']),
+  require('./routes/customerReportRoutes')
+);
 
-// Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ status: 'Online', message: 'ReeferON CRM API Backend running smoothly.' });
 });
 
-// Wildcard route to serve React app's index.html for any frontend routes
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) {
     return res.status(404).json({ error: 'API route not found' });
@@ -126,20 +141,8 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
 });
 
-// Global unhandled error handling middleware boundary
-app.use(async (err, req, res, next) => {
-  console.error('❌ Unhandled Exception:', err);
-  try {
-    const { logActivity } = require('./utils/logger');
-    const userEmail = req.user?.email || 'system';
-    await logActivity(userEmail, 'SYSTEM_ERROR', 'ERROR', `Unhandled Exception: ${err.message}. Route: ${req.method} ${req.originalUrl}. Stack: ${err.stack?.substring(0, 300)}`);
-  } catch (logErr) {
-    console.error('Failed to log unhandled exception:', logErr);
-  }
-  res.status(500).json({ error: 'A system error occurred. Please contact support.' });
-});
+app.use(require('./utils/errorHandler').globalErrorMiddleware);
 
-// Start Server
 app.listen(PORT, () => {
-  console.log(`🚀 ReeferON CRM Server listening on port ${PORT}`);
+  serverRunning(PORT);
 });

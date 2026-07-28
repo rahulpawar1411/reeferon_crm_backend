@@ -10,4 +10,7 @@ const dashboardController = require('../controllers/dashboardController');
 router.get('/stats', dashboardController.getDashboardStats);
 router.get('/', dashboardController.getDashboardStats);
 
+// GET /api/dashboard/access-options - Fetch distinct clients & warehouses for sub-admin scope
+router.get('/access-options', dashboardController.getAccessScopeOptions);
+
 module.exports = router;

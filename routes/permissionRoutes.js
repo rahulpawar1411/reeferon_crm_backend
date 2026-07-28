@@ -27,4 +27,12 @@ router.post('/', verifyToken, permissionController.createPermissionRequest);
 // 6. Approve or deny permission request (Super Admin only)
 router.put('/:id', verifyToken, requireRole(['super_admin']), permissionController.updatePermissionRequestStatus);
 
+// 7. DO marks notification as handled (Completed section)
+router.patch(
+  '/:id/complete',
+  verifyToken,
+  requireRole(['do_operator', 'super_admin']),
+  permissionController.markPermissionActionComplete
+);
+
 module.exports = router;

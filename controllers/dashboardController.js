@@ -47,3 +47,57 @@ exports.getDashboardStats = async (req, res) => {
     });
   }
 };
+
+/**
+ * GET DISTINCT CLIENTS & WAREHOUSES (for Sub-Admin access scope selection)
+ */
+exports.getAccessScopeOptions = async (req, res) => {
+  try {
+    const clientSet = new Set();
+    const warehouseSet = new Set();
+
+    const clientQueries = [
+      `SELECT DISTINCT client_name AS name FROM daily_chamber_temp_logs WHERE client_name IS NOT NULL AND TRIM(client_name) != ''`,
+      `SELECT DISTINCT inward_client_name AS name FROM inward_temp_logs WHERE inward_client_name IS NOT NULL AND TRIM(inward_client_name) != ''`,
+      `SELECT DISTINCT outward_client_name AS name FROM outward_temp_logs WHERE outward_client_name IS NOT NULL AND TRIM(outward_client_name) != ''`,
+      `SELECT DISTINCT client_name AS name FROM daily_temp_logs WHERE client_name IS NOT NULL AND TRIM(client_name) != ''`
+    ];
+
+    for (const sql of clientQueries) {
+      try {
+        const [rows] = await db.query(sql);
+        rows.forEach((row) => {
+          if (row.name) clientSet.add(String(row.name).trim());
+        });
+      } catch (tableErr) {
+        console.warn('Access scope client query skipped:', tableErr.message);
+      }
+    }
+
+    const warehouseQueries = [
+      `SELECT DISTINCT warehouse_name AS name FROM daily_chamber_temp_logs WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`,
+      `SELECT DISTINCT warehouse_name AS name FROM inward_temp_logs WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`,
+      `SELECT DISTINCT warehouse_name AS name FROM outward_temp_logs WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`,
+      `SELECT DISTINCT warehouse_name AS name FROM daily_temp_logs WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`
+    ];
+
+    for (const sql of warehouseQueries) {
+      try {
+        const [rows] = await db.query(sql);
+        rows.forEach((row) => {
+          if (row.name) warehouseSet.add(String(row.name).trim());
+        });
+      } catch (tableErr) {
+        console.warn('Access scope warehouse query skipped:', tableErr.message);
+      }
+    }
+
+    const clients = [...clientSet].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    const warehouses = [...warehouseSet].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+
+    return res.json({ clients, warehouses });
+  } catch (error) {
+    console.error('Error fetching access scope options:', error);
+    return res.status(500).json({ error: 'Failed to fetch options.' });
+  }
+};

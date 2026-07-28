@@ -6,8 +6,10 @@
 const db = require('../config/db');
 const exifr = require('exifr');
 const fs = require('fs');
-const { logActivity } = require('../utils/logger');
+const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
+const { parsePagination, sendPaginated, appendWarehouseFilter } = require('../utils/pagination');
+const { logErrorCheckpoint } = require('../utils/errorHandler');
 
 let memoryChamberLogs = [];
 
@@ -66,6 +68,7 @@ function calculateVariance(entryDateStr, inspectionTimeStr, captureDate) {
 // GET all chamber temp logs
 exports.getChamberLogs = async (req, res) => {
   const { search } = req.query;
+  const { page, limit, offset } = parsePagination(req.query);
 
   try {
     let conditions = [];
@@ -76,17 +79,64 @@ exports.getChamberLogs = async (req, res) => {
       params.push(req.user.warehouse_name);
     }
 
-    if (search) {
-      conditions.push('(reference_no LIKE ? OR client_name LIKE ? OR chamber_name LIKE ? OR monitor_supervisor_name LIKE ? OR inspection_time LIKE ?)');
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    // Sub-Admin scoped filtering by allowed clients & warehouses
+    if (req.user && req.user.role === 'sub_admin') {
+      if (req.user.allowed_clients) {
+        const clients = req.user.allowed_clients.split(',').map(c => c.trim()).filter(Boolean);
+        if (clients.length > 0) {
+          const placeholders = clients.map(() => '?').join(', ');
+          conditions.push(`client_name IN (${placeholders})`);
+          params.push(...clients);
+        }
+      }
+      if (req.user.allowed_warehouses) {
+        const warehouses = req.user.allowed_warehouses.split(',').map(w => w.trim()).filter(Boolean);
+        if (warehouses.length > 0) {
+          const placeholders = warehouses.map(() => '?').join(', ');
+          conditions.push(`(warehouse_name IN (${placeholders}) OR warehouse_name IS NULL)`);
+          params.push(...warehouses);
+        }
+      }
     }
 
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const query = `SELECT id, reference_no, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC`;
+    if (search) {
+      conditions.push('(reference_no LIKE ? OR client_name LIKE ? OR chamber_name LIKE ? OR monitor_supervisor_name LIKE ? OR inspection_time LIKE ? OR operator_email LIKE ?)');
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    }
 
-    const [rows] = await db.query(query, params);
-    return res.json(rows);
+    const { fromDate, toDate } = req.query;
+    if (fromDate) {
+      conditions.push('entry_date >= ?');
+      params.push(fromDate);
+    }
+    if (toDate) {
+      conditions.push('entry_date <= ?');
+      params.push(toDate);
+    }
+
+    appendWarehouseFilter(conditions, params, req.query, req.user);
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const [countRows] = await db.query(
+      `SELECT COUNT(*) AS total FROM daily_chamber_temp_logs ${whereClause}`,
+      params
+    );
+    const total = countRows[0]?.total ?? 0;
+
+    const query = `SELECT id, reference_no, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC LIMIT ? OFFSET ?`;
+
+    const [rows] = await db.query(query, [...params, limit, offset]);
+    return sendPaginated(res, rows, total, page, limit);
   } catch (err) {
+    // Soft-fail to in-memory fallback, but keep a structured checkpoint for Super Admin
+    await logErrorCheckpoint(err, {
+      checkpoint: 'getChamberLogs',
+      statusCode: 500,
+      method: req.method,
+      url: req.originalUrl,
+      email: req.user?.email || 'system'
+    });
     let filtered = [...memoryChamberLogs];
     if (search) {
       const q = search.toLowerCase();
@@ -98,7 +148,7 @@ exports.getChamberLogs = async (req, res) => {
         (l.monitor_supervisor_name && l.monitor_supervisor_name.toLowerCase().includes(q))
       );
     }
-    return res.json(filtered);
+    return sendPaginated(res, filtered.slice(offset, offset + limit), filtered.length, page, limit);
   }
 };
 
@@ -189,11 +239,18 @@ exports.addChamberLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'CREATE',
       'Chamber Temp Log',
-      `Created Chamber Temp record for entry date ${entry_date} and client ${client_name} (Ref: ${reference_no})`
+      `${await getActorLabel(req.user)} created Chamber Temp record (Ref: ${reference_no}) — chamber ${chamber_name || '-'}, client ${client_name || '-'}, date ${entry_date || '-'}`
     );
 
     return res.status(201).json({ id: insertId, reference_no, temp_sensor_image, photo_capture_time, time_variance_minutes, message: 'Chamber temperature record saved.' });
   } catch (err) {
+    await logErrorCheckpoint(err, {
+      checkpoint: 'addChamberLog',
+      statusCode: 500,
+      method: req.method,
+      url: req.originalUrl,
+      email: req.user?.email || 'system'
+    });
     const newLog = {
       id: Date.now(),
       entry_date,
@@ -219,12 +276,13 @@ exports.updateChamberLog = async (req, res) => {
   const { chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, entry_date, client_name } = req.body;
 
   try {
-    const [existingRows] = await db.query('SELECT reference_no, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes FROM daily_chamber_temp_logs WHERE id = ?', [id]);
+    const [existingRows] = await db.query('SELECT reference_no, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count FROM daily_chamber_temp_logs WHERE id = ?', [id]);
     
     let temp_sensor_image = req.body.temp_sensor_image;
     let photo_capture_time = null;
     let time_variance_minutes = 0;
     let update_details = null;
+    let update_count = 0;
 
     if (existingRows.length > 0) {
       const current = existingRows[0];
@@ -280,6 +338,7 @@ exports.updateChamberLog = async (req, res) => {
       };
 
       update_details = buildDiffString(current, updatedValues, chamberFieldMapping);
+      update_count = (parseInt(current.update_count, 10) || 0) + 1;
     }
 
     const localTimestamp = formatDateTime(new Date());
@@ -296,6 +355,7 @@ exports.updateChamberLog = async (req, res) => {
         photo_capture_time = ?,
         time_variance_minutes = ?,
         update_details = ?,
+        update_count = ?,
         updated_at = ?
       WHERE id = ?
     `;
@@ -310,20 +370,29 @@ exports.updateChamberLog = async (req, res) => {
       photo_capture_time,
       time_variance_minutes,
       update_details || null,
+      update_count,
       localTimestamp,
       id
     ]);
 
-    // Log Operator Activity
+    // Log Operator Activity (includes Super Admin / Sub Admin / DO updates)
+    const refNo = (existingRows[0] && existingRows[0].reference_no) || `RF-CH-26-${String(id).padStart(4, '0')}`;
     await logActivity(
       req.user ? req.user.email : 'unknown',
       'UPDATE',
       'Chamber Temp Log',
-      `Updated Chamber Temp record ID #${id} (Ref: ${current.reference_no || ''})${update_details ? `. Changes: ${update_details}` : ''}`
+      `${await getActorLabel(req.user)} updated Chamber Temp record (Ref: ${refNo})${update_details ? `. Changes: ${update_details}` : ''}`
     );
 
     return res.json({ message: 'Record updated successfully.', photo_capture_time, time_variance_minutes });
   } catch (err) {
+    await logErrorCheckpoint(err, {
+      checkpoint: 'updateChamberLog',
+      statusCode: 500,
+      method: req.method,
+      url: req.originalUrl,
+      email: req.user?.email || 'system'
+    });
     const item = memoryChamberLogs.find(l => l.id == id);
     if (item) {
       if (entry_date) item.entry_date = entry_date;
@@ -352,6 +421,15 @@ exports.deleteChamberLog = async (req, res) => {
   const { id } = req.params;
 
   try {
+    const [rows] = await db.query(
+      'SELECT reference_no, chamber_name, client_name FROM daily_chamber_temp_logs WHERE id = ?',
+      [id]
+    );
+    const record = rows[0] || {};
+    const refNo = record.reference_no || `RF-CH-26-${String(id).padStart(4, '0')}`;
+    const chamberName = record.chamber_name || '-';
+    const clientName = record.client_name || '-';
+
     await db.query(`DELETE FROM daily_chamber_temp_logs WHERE id = ?`, [id]);
     
     // Log Operator Activity
@@ -359,11 +437,18 @@ exports.deleteChamberLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'DELETE',
       'Chamber Temp Log',
-      `Deleted Chamber Temp record ID #${id}`
+      `${await getActorLabel(req.user)} deleted Chamber Temp record (Ref: ${refNo}) — chamber ${chamberName}, client ${clientName}`
     );
 
     return res.json({ message: 'Record deleted successfully.' });
   } catch (err) {
+    await logErrorCheckpoint(err, {
+      checkpoint: 'deleteChamberLog',
+      statusCode: 500,
+      method: req.method,
+      url: req.originalUrl,
+      email: req.user?.email || 'system'
+    });
     memoryChamberLogs = memoryChamberLogs.filter(l => l.id != id);
     return res.json({ message: 'Record deleted from memory.' });
   }

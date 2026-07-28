@@ -137,24 +137,30 @@ async function run() {
         id INT AUTO_INCREMENT PRIMARY KEY,
         email VARCHAR(150) NOT NULL UNIQUE,
         password VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        full_name VARCHAR(150) DEFAULT NULL,
+        phone_no VARCHAR(20) DEFAULT NULL,
+        allowed_clients TEXT DEFAULT NULL,
+        allowed_warehouses TEXT DEFAULT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
       )
     `);
     console.log("✅ sub_admins table verified/created successfully.");
 
-    // Alter table to add full_name and phone_no columns if they don't exist
-    try {
-      await db.query("ALTER TABLE sub_admins ADD COLUMN full_name VARCHAR(150) DEFAULT NULL");
-      console.log("Added full_name column to sub_admins table.");
-    } catch (e) {
-      // Ignore if column already exists
-    }
-
-    try {
-      await db.query("ALTER TABLE sub_admins ADD COLUMN phone_no VARCHAR(20) DEFAULT NULL");
-      console.log("Added phone_no column to sub_admins table.");
-    } catch (e) {
-      // Ignore if column already exists
+    const [subCols] = await db.query('SHOW COLUMNS FROM sub_admins');
+    const subColNames = subCols.map((c) => c.Field);
+    const subAlters = [
+      { name: 'full_name', sql: 'ALTER TABLE sub_admins ADD COLUMN full_name VARCHAR(150) DEFAULT NULL' },
+      { name: 'phone_no', sql: 'ALTER TABLE sub_admins ADD COLUMN phone_no VARCHAR(20) DEFAULT NULL' },
+      { name: 'allowed_clients', sql: 'ALTER TABLE sub_admins ADD COLUMN allowed_clients TEXT DEFAULT NULL' },
+      { name: 'allowed_warehouses', sql: 'ALTER TABLE sub_admins ADD COLUMN allowed_warehouses TEXT DEFAULT NULL' },
+      { name: 'updated_at', sql: 'ALTER TABLE sub_admins ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' }
+    ];
+    for (const { name, sql } of subAlters) {
+      if (!subColNames.includes(name)) {
+        await db.query(sql);
+        console.log(`➕ Added ${name} column to sub_admins.`);
+      }
     }
 
     // 4. Seed initial default users if tables are empty
