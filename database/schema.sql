@@ -7,15 +7,22 @@ DROP TABLE IF EXISTS daily_chamber_temp_logs;
 
 CREATE TABLE daily_chamber_temp_logs (
     id INT AUTO_INCREMENT PRIMARY KEY,
+    reference_no VARCHAR(50) DEFAULT NULL,
     entry_date DATE NOT NULL,
     client_name VARCHAR(150) NOT NULL,
     chamber_name VARCHAR(100) NOT NULL,
     inspection_time VARCHAR(50) NOT NULL,
-    chamber_temp DECIMAL(4,1) NOT NULL,
+    box_temp DECIMAL(4,1) NOT NULL,
     monitor_supervisor_name VARCHAR(150) NOT NULL,
     temp_sensor_image VARCHAR(255) DEFAULT NULL,
     photo_capture_time VARCHAR(50) DEFAULT NULL,
     time_variance_minutes INT DEFAULT 0,
+    box_count INT DEFAULT NULL,
+    chamber_type VARCHAR(50) DEFAULT 'Frozen',
+    overdue_time VARCHAR(100) DEFAULT 'same day',
+    warehouse_name VARCHAR(150) DEFAULT NULL,
+    operator_email VARCHAR(150) DEFAULT NULL,
+    is_native INT DEFAULT 0,
     update_details TEXT DEFAULT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP

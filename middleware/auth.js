@@ -4,15 +4,23 @@
 // ====================================================================
 
 const jwt = require('jsonwebtoken');
+const db = require('../config/db');
 
 /**
  * 1. Global Authentication Verification Middleware
  * Extracts the JWT token from HttpOnly cookies and verifies its signature.
  */
-exports.verifyToken = (req, res, next) => {
+exports.verifyToken = async (req, res, next) => {
   try {
-    // Read token from cookies (requires cookie-parser)
-    const token = req.cookies.token;
+    // Read token from cookies or Authorization header
+    let token = req.cookies.token;
+    
+    if (!token && req.headers.authorization) {
+      const authHeader = req.headers.authorization;
+      if (authHeader.startsWith('Bearer ')) {
+        token = authHeader.substring(7);
+      }
+    }
 
     if (!token) {
       return res.status(401).json({
@@ -24,6 +32,31 @@ exports.verifyToken = (req, res, next) => {
     // Verify JWT Signature
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'ReeferON_SuperSecured_JWT_Secret_Token_Key_2026');
     
+    // Check if the user still exists in the database
+    let userExists = false;
+    try {
+      if (decoded.role === 'super_admin') {
+        const [rows] = await db.query('SELECT id FROM super_admin WHERE email = ? LIMIT 1', [decoded.email]);
+        if (rows.length > 0) userExists = true;
+      } else if (decoded.role === 'sub_admin') {
+        const [rows] = await db.query('SELECT id FROM sub_admins WHERE email = ? LIMIT 1', [decoded.email]);
+        if (rows.length > 0) userExists = true;
+      } else if (decoded.role === 'do_operator') {
+        const [rows] = await db.query('SELECT id FROM do_operators WHERE email = ? LIMIT 1', [decoded.email]);
+        if (rows.length > 0) userExists = true;
+      }
+    } catch (dbErr) {
+      console.warn('⚠️ DB verifyToken check failed, defaulting to allow request:', dbErr.message);
+      userExists = true; // Fallback to prevent blocking user in case of query errors
+    }
+
+    if (!userExists) {
+      return res.status(401).json({
+        success: false,
+        message: 'Your account has been deleted or disabled. Please log in again.'
+      });
+    }
+
     // Attach decoded user context (id, email, role) to the request object
     req.user = decoded;
     

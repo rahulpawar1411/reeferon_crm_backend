@@ -124,7 +124,7 @@ exports.getChamberLogs = async (req, res) => {
     );
     const total = countRows[0]?.total ?? 0;
 
-    const query = `SELECT id, reference_no, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC LIMIT ? OFFSET ?`;
+    const query = `SELECT id, reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, box_temp AS chamber_temp, box_count, overdue_time, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email, chamber_type FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC LIMIT ? OFFSET ?`;
 
     const [rows] = await db.query(query, [...params, limit, offset]);
     return sendPaginated(res, rows, total, page, limit);
@@ -159,7 +159,7 @@ exports.addChamberLog = async (req, res) => {
     client_name, 
     chamber_name, 
     inspection_time, 
-    chamber_temp, 
+    box_temp, 
     monitor_supervisor_name 
   } = req.body;
 
@@ -198,15 +198,15 @@ exports.addChamberLog = async (req, res) => {
     }
   }
 
-  if (!entry_date || !client_name || !chamber_name || !chamber_temp || !monitor_supervisor_name) {
-    return res.status(400).json({ error: 'Entry Date, Client Name, Chamber Name, Chamber Temp, and Monitor Supervisor Name are required.' });
+  if (!entry_date || !client_name || !chamber_name || box_temp === undefined || !monitor_supervisor_name) {
+    return res.status(400).json({ error: 'Entry Date, Client Name, Chamber Name, Box Temp, and Monitor Supervisor Name are required.' });
   }
 
   try {
     const localTimestamp = formatDateTime(new Date());
     const query = `
       INSERT INTO daily_chamber_temp_logs 
-      (entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, created_at, updated_at, warehouse_name, operator_email)
+      (entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, created_at, updated_at, warehouse_name, operator_email)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const values = [
@@ -214,7 +214,7 @@ exports.addChamberLog = async (req, res) => {
       client_name, 
       chamber_name, 
       inspection_time || '11:00',
-      chamber_temp,
+      box_temp,
       monitor_supervisor_name,
       temp_sensor_image,
       photo_capture_time,
@@ -258,7 +258,7 @@ exports.addChamberLog = async (req, res) => {
       client_name,
       chamber_name,
       inspection_time: inspection_time || '11:00',
-      chamber_temp: parseFloat(chamber_temp),
+      box_temp: parseFloat(box_temp),
       monitor_supervisor_name,
       temp_sensor_image,
       photo_capture_time,
@@ -273,10 +273,17 @@ exports.addChamberLog = async (req, res) => {
 // UPDATE temperature fields inline
 exports.updateChamberLog = async (req, res) => {
   const { id } = req.params;
-  const { chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, entry_date, client_name } = req.body;
+  const { chamber_name, inspection_time, box_temp, monitor_supervisor_name, entry_date, client_name, remarks } = req.body;
+
+  if (!remarks || !remarks.trim()) {
+    return res.status(400).json({
+      success: false,
+      message: 'Remarks are required to update this log.'
+    });
+  }
 
   try {
-    const [existingRows] = await db.query('SELECT reference_no, entry_date, client_name, chamber_name, inspection_time, chamber_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count FROM daily_chamber_temp_logs WHERE id = ?', [id]);
+    const [existingRows] = await db.query('SELECT reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count, chamber_type FROM daily_chamber_temp_logs WHERE id = ?', [id]);
     
     let temp_sensor_image = req.body.temp_sensor_image;
     let photo_capture_time = null;
@@ -322,9 +329,10 @@ exports.updateChamberLog = async (req, res) => {
         client_name: client_name || current.client_name,
         chamber_name: chamber_name || current.chamber_name,
         inspection_time: inspection_time || current.inspection_time,
-        chamber_temp: chamber_temp !== undefined ? (chamber_temp !== '' ? parseFloat(chamber_temp) : null) : current.chamber_temp,
+        box_temp: box_temp !== undefined ? (box_temp !== '' ? parseFloat(box_temp) : null) : current.box_temp,
         monitor_supervisor_name: monitor_supervisor_name || current.monitor_supervisor_name,
-        temp_sensor_image: temp_sensor_image
+        temp_sensor_image: temp_sensor_image,
+        box_count: req.body.box_count !== undefined ? (req.body.box_count !== '' ? parseInt(req.body.box_count, 10) : null) : current.box_count
       };
 
       const chamberFieldMapping = {
@@ -332,9 +340,10 @@ exports.updateChamberLog = async (req, res) => {
         client_name: 'Client Name',
         chamber_name: 'Chamber',
         inspection_time: 'Inspection Time',
-        chamber_temp: 'Chamber Temp',
+        box_temp: 'Box Temp',
         monitor_supervisor_name: 'Supervisor',
-        temp_sensor_image: 'Sensor Image'
+        temp_sensor_image: 'Sensor Image',
+        box_count: 'Box Count'
       };
 
       update_details = buildDiffString(current, updatedValues, chamberFieldMapping);
@@ -349,13 +358,14 @@ exports.updateChamberLog = async (req, res) => {
         client_name = COALESCE(?, client_name),
         chamber_name = COALESCE(?, chamber_name), 
         inspection_time = COALESCE(?, inspection_time), 
-        chamber_temp = COALESCE(?, chamber_temp), 
+        box_temp = COALESCE(?, box_temp), 
         monitor_supervisor_name = COALESCE(?, monitor_supervisor_name),
         temp_sensor_image = COALESCE(?, temp_sensor_image),
         photo_capture_time = ?,
         time_variance_minutes = ?,
         update_details = ?,
         update_count = ?,
+        remarks = ?,
         updated_at = ?
       WHERE id = ?
     `;
@@ -364,13 +374,14 @@ exports.updateChamberLog = async (req, res) => {
       client_name || null,
       chamber_name || null,
       inspection_time || null,
-      chamber_temp !== undefined ? (chamber_temp !== '' ? chamber_temp : null) : null,
+      box_temp !== undefined ? (box_temp !== '' ? box_temp : null) : null,
       monitor_supervisor_name || null,
       temp_sensor_image,
       photo_capture_time,
       time_variance_minutes,
       update_details || null,
       update_count,
+      remarks || null,
       localTimestamp,
       id
     ]);
@@ -381,7 +392,7 @@ exports.updateChamberLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'UPDATE',
       'Chamber Temp Log',
-      `${await getActorLabel(req.user)} updated Chamber Temp record (Ref: ${refNo})${update_details ? `. Changes: ${update_details}` : ''}`
+      `${await getActorLabel(req.user)} updated Chamber Temp record (Ref: ${refNo})${update_details ? `. Changes: ${update_details}` : ''}. Remarks: ${remarks}`
     );
 
     return res.json({ message: 'Record updated successfully.', photo_capture_time, time_variance_minutes });
@@ -399,7 +410,7 @@ exports.updateChamberLog = async (req, res) => {
       if (client_name) item.client_name = client_name;
       if (chamber_name) item.chamber_name = chamber_name;
       if (inspection_time) item.inspection_time = inspection_time;
-      if (chamber_temp !== undefined) item.chamber_temp = chamber_temp !== '' ? parseFloat(chamber_temp) : null;
+      if (box_temp !== undefined) item.box_temp = box_temp !== '' ? parseFloat(box_temp) : null;
       if (monitor_supervisor_name) item.monitor_supervisor_name = monitor_supervisor_name;
       if (req.file) {
         item.temp_sensor_image = `uploads/daily_temp_monitor_images/${req.file.filename}`;
@@ -419,6 +430,14 @@ exports.updateChamberLog = async (req, res) => {
 // DELETE record
 exports.deleteChamberLog = async (req, res) => {
   const { id } = req.params;
+  const remarks = (req.body.remarks || req.query.remarks || '').trim();
+
+  if (!remarks) {
+    return res.status(400).json({
+      success: false,
+      message: 'Remarks are required to delete this log.'
+    });
+  }
 
   try {
     const [rows] = await db.query(
@@ -437,7 +456,7 @@ exports.deleteChamberLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'DELETE',
       'Chamber Temp Log',
-      `${await getActorLabel(req.user)} deleted Chamber Temp record (Ref: ${refNo}) — chamber ${chamberName}, client ${clientName}`
+      `${await getActorLabel(req.user)} deleted Chamber Temp record (Ref: ${refNo}) — chamber ${chamberName}, client ${clientName}. Remarks: ${remarks}`
     );
 
     return res.json({ message: 'Record deleted successfully.' });

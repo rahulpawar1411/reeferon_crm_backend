@@ -44,6 +44,10 @@ async function testDbConnection() {
         await pool.query('ALTER TABLE do_operators ADD COLUMN warehouse_name VARCHAR(150) DEFAULT NULL');
         console.log('🌱 Added column warehouse_name to do_operators.');
       }
+      if (!colNames.includes('chamber_limit')) {
+        await pool.query('ALTER TABLE do_operators ADD COLUMN chamber_limit INT DEFAULT 4');
+        console.log('🌱 Added column chamber_limit to do_operators.');
+      }
     } catch (tblErr) {
       console.warn('⚠️ Table do_operators verification skipped:', tblErr.message);
     }
@@ -60,7 +64,7 @@ async function testDbConnection() {
           allowed_clients TEXT DEFAULT NULL,
           allowed_warehouses TEXT DEFAULT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+          updated_at TIMESTAMP NULL DEFAULT NULL
         )
       `);
 
@@ -84,7 +88,7 @@ async function testDbConnection() {
         console.log('🌱 Added column allowed_warehouses to sub_admins.');
       }
       if (!subColNames.includes('updated_at')) {
-        await pool.query('ALTER TABLE sub_admins ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+        await pool.query('ALTER TABLE sub_admins ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL');
         console.log('🌱 Added column updated_at to sub_admins.');
       }
       console.log('🌱 Verified sub_admins table schema.');
@@ -291,7 +295,7 @@ async function testDbConnection() {
           status VARCHAR(50) DEFAULT 'Open',
           reviewed_by_email VARCHAR(150) DEFAULT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NULL DEFAULT NULL,
           resolved_at TIMESTAMP NULL DEFAULT NULL,
           INDEX idx_customer_reports_ref (reference_no),
           INDEX idx_customer_reports_email (customer_email),
@@ -308,7 +312,7 @@ async function testDbConnection() {
         ['allowed_clients', 'ADD COLUMN allowed_clients TEXT DEFAULT NULL AFTER customer_phone'],
         ['allowed_warehouses', 'ADD COLUMN allowed_warehouses TEXT DEFAULT NULL AFTER allowed_clients'],
         ['reviewed_by_email', 'ADD COLUMN reviewed_by_email VARCHAR(150) DEFAULT NULL AFTER status'],
-        ['updated_at', 'ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP AFTER created_at'],
+        ['updated_at', 'ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL AFTER created_at'],
         ['resolved_at', 'ADD COLUMN resolved_at TIMESTAMP NULL DEFAULT NULL AFTER updated_at']
       ];
       for (const [col, ddl] of crAlters) {
@@ -331,15 +335,17 @@ async function testDbConnection() {
           client_name VARCHAR(150) NOT NULL,
           chamber_name VARCHAR(100) NOT NULL,
           inspection_time VARCHAR(50) NOT NULL,
-          chamber_temp DECIMAL(4,1) NOT NULL,
+          box_temp DECIMAL(4,1) NOT NULL,
           monitor_supervisor_name VARCHAR(150) NOT NULL,
           temp_sensor_image VARCHAR(255) DEFAULT NULL,
           photo_capture_time VARCHAR(50) DEFAULT NULL,
           time_variance_minutes INT DEFAULT 0,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NULL DEFAULT NULL,
           warehouse_name VARCHAR(150) DEFAULT NULL,
-          operator_email VARCHAR(150) DEFAULT NULL
+          operator_email VARCHAR(150) DEFAULT NULL,
+          chamber_type VARCHAR(50) DEFAULT 'Frozen',
+          overdue_time VARCHAR(100) DEFAULT 'same day'
         )
       `);
       console.log('🌱 Verified daily_chamber_temp_logs table is online.');
@@ -359,13 +365,162 @@ async function testDbConnection() {
           last_failed_at DATETIME DEFAULT NULL,
           locked_until DATETIME DEFAULT NULL,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-          UNIQUE KEY uniq_login_security_email (email)
+          unique key uniq_login_security_email (email)
         )
       `);
       console.log('🌱 Verified login_security table is online.');
     } catch (loginSecErr) {
       console.warn('⚠️ Table login_security creation failed:', loginSecErr.message);
     }
+
+    // Auto migration: Chambers and Client Assignments Daily Task Module
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS chambers (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          name VARCHAR(100) NOT NULL UNIQUE,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      console.log('🌱 Verified chambers table is online.');
+      
+      // Seed default chambers if empty
+      const [chamberRows] = await pool.query('SELECT COUNT(*) AS cnt FROM chambers');
+      if (chamberRows[0].cnt === 0) {
+        await pool.query("INSERT INTO chambers (name) VALUES ('Chamber 1'), ('Chamber 2'), ('Chamber 3'), ('Chamber 4')");
+        console.log('🌱 Seeded default chambers.');
+      }
+    } catch (chErr) {
+      console.warn('⚠️ Table chambers creation failed:', chErr.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS chamber_client_assignments (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          chamber_id INT NOT NULL,
+          client_name VARCHAR(150) NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (chamber_id) REFERENCES chambers(id) ON DELETE CASCADE,
+          UNIQUE KEY uq_chamber_client (chamber_id, client_name)
+        )
+      `);
+      console.log('🌱 Verified chamber_client_assignments table is online.');
+
+      // Seed assignments if empty
+      const [assignRows] = await pool.query('SELECT COUNT(*) AS cnt FROM chamber_client_assignments');
+      if (assignRows[0].cnt === 0) {
+        const [chambers] = await pool.query('SELECT id, name FROM chambers');
+        const c1 = chambers.find(c => c.name === 'Chamber 1')?.id;
+        const c2 = chambers.find(c => c.name === 'Chamber 2')?.id;
+        const c3 = chambers.find(c => c.name === 'Chamber 3')?.id;
+        const c4 = chambers.find(c => c.name === 'Chamber 4')?.id;
+
+        if (c1) await pool.query(`INSERT INTO chamber_client_assignments (chamber_id, client_name) VALUES (${c1}, 'Amul'), (${c1}, 'HyFun')`);
+        if (c2) await pool.query(`INSERT INTO chamber_client_assignments (chamber_id, client_name) VALUES (${c2}, 'Mother Dairy')`);
+        if (c3) await pool.query(`INSERT INTO chamber_client_assignments (chamber_id, client_name) VALUES (${c3}, 'Kwality Walls')`);
+        if (c4) await pool.query(`INSERT INTO chamber_client_assignments (chamber_id, client_name) VALUES (${c4}, 'Baskin Robbins'), (${c4}, 'Creambell')`);
+        console.log('🌱 Seeded default chamber-client assignments.');
+      }
+    } catch (assErr) {
+      console.warn('⚠️ Table chamber_client_assignments creation failed:', assErr.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS do_daily_inspections (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          operator_name VARCHAR(150) NOT NULL,
+          chamber_id INT NOT NULL,
+          client_name VARCHAR(150) NOT NULL,
+          entry_date DATE NOT NULL,
+          entry_time VARCHAR(50) NOT NULL,
+          temperature DECIMAL(5,2) NOT NULL,
+          photo_url VARCHAR(255) DEFAULT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (chamber_id) REFERENCES chambers(id) ON DELETE CASCADE,
+          UNIQUE KEY uq_date_chamber_client (entry_date, chamber_id, client_name)
+        )
+      `);
+      console.log('🌱 Verified do_daily_inspections table is online.');
+    } catch (inspErr) {
+      console.warn('⚠️ Table do_daily_inspections creation failed:', inspErr.message);
+    }
+
+
+    // Auto migration: Add is_native to daily_chamber_temp_logs for native logs segregation
+    try {
+      await pool.query('ALTER TABLE daily_chamber_temp_logs ADD COLUMN is_native INT DEFAULT 0');
+      console.log('🌱 Added is_native column to daily_chamber_temp_logs.');
+    } catch (colErr) {
+      // Ignored if column already exists
+    }
+
+    // Auto migration: Add box_count to daily_chamber_temp_logs
+    try {
+      await pool.query('ALTER TABLE daily_chamber_temp_logs ADD COLUMN box_count INT DEFAULT NULL');
+      console.log('🌱 Added box_count column to daily_chamber_temp_logs.');
+    } catch (colErr) {
+      // Ignored if column already exists
+    }
+
+    // Auto migration: Add chamber_type to daily_chamber_temp_logs
+    try {
+      await pool.query("ALTER TABLE daily_chamber_temp_logs ADD COLUMN chamber_type VARCHAR(50) DEFAULT 'Frozen'");
+      console.log('🌱 Added chamber_type column to daily_chamber_temp_logs.');
+    } catch (colErr) {
+      // Ignored if column already exists
+    }
+
+    // Auto migration: Add overdue_time to daily_chamber_temp_logs
+    try {
+      await pool.query("ALTER TABLE daily_chamber_temp_logs ADD COLUMN overdue_time VARCHAR(100) DEFAULT 'same day'");
+      console.log('🌱 Added overdue_time column to daily_chamber_temp_logs.');
+    } catch (colErr) {
+      // Ignored if column already exists
+    }
+
+    // Auto migration: Add warehouse_name to daily_chamber_temp_logs
+    try {
+      await pool.query('ALTER TABLE daily_chamber_temp_logs ADD COLUMN warehouse_name VARCHAR(150) DEFAULT NULL');
+      console.log('🌱 Added warehouse_name column to daily_chamber_temp_logs.');
+    } catch (colErr) {
+      // Ignored if column already exists
+    }
+
+    // Auto migration: Add shift to daily_chamber_temp_logs
+    try {
+      const [columns] = await pool.query("SHOW COLUMNS FROM daily_chamber_temp_logs LIKE 'shift'");
+      if (columns.length === 0) {
+        await pool.query("ALTER TABLE daily_chamber_temp_logs ADD COLUMN shift VARCHAR(50) DEFAULT 'Morning'");
+        console.log('🌱 Added shift column to daily_chamber_temp_logs.');
+      }
+    } catch (colErr) {
+      console.warn('⚠️ Failed to migrate shift column:', colErr.message);
+    }
+
+    // Auto migration: Add remarks to daily_chamber_temp_logs
+    try {
+      const [columns] = await pool.query("SHOW COLUMNS FROM daily_chamber_temp_logs LIKE 'remarks'");
+      if (columns.length === 0) {
+        await pool.query("ALTER TABLE daily_chamber_temp_logs ADD COLUMN remarks TEXT DEFAULT NULL");
+        console.log('🌱 Added remarks column to daily_chamber_temp_logs.');
+      }
+    } catch (colErr) {
+      console.warn('⚠️ Failed to migrate remarks column:', colErr.message);
+    }
+
+    // Auto migration: Rename chamber_temp to box_temp in daily_chamber_temp_logs
+    try {
+      const [columns] = await pool.query("SHOW COLUMNS FROM daily_chamber_temp_logs LIKE 'chamber_temp'");
+      if (columns.length > 0) {
+        await pool.query('ALTER TABLE daily_chamber_temp_logs CHANGE COLUMN chamber_temp box_temp DECIMAL(4,1) NOT NULL');
+        console.log('🌱 Successfully renamed daily_chamber_temp_logs.chamber_temp to box_temp.');
+      }
+    } catch (colErr) {
+      console.warn('⚠️ Failed to rename chamber_temp column:', colErr.message);
+    }
+
 
     // Log successful server startup process
     try {

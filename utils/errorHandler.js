@@ -4,6 +4,7 @@
 // Persists ERROR rows into do_operator_activities for Super Admin logs.
 // ====================================================================
 
+const fs = require('fs');
 const path = require('path');
 const { logActivity } = require('./logger');
 
@@ -118,6 +119,40 @@ function formatCheckpointDescription(cp) {
 }
 
 /**
+ * Append error details and stack trace to backend/logs/error.log
+ */
+function logToFile(cp, err) {
+  try {
+    const logsDir = path.join(__dirname, '..', 'logs');
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+    const logFilePath = path.join(logsDir, 'error.log');
+    
+    const timestamp = new Date().toISOString();
+    const status = cp.status || 500;
+    const method = cp.method || '-';
+    const url = cp.url || '-';
+    const type = cp.type || 'Error';
+    const file = cp.file || '?';
+    const line = cp.line ?? '?';
+    const message = cp.message || 'Unknown error';
+    const stack = err && err.stack ? err.stack : 'No stack trace available';
+
+    const logMessage = `[${timestamp}] [${type}] [Status: ${status}] [${method} ${url}]
+Location: ${file}:${line} (Checkpoint: ${cp.checkpoint || 'unknown'})
+Message: ${message}
+Stack Trace:
+${stack}
+--------------------------------------------------------------------------------\n`;
+
+    fs.appendFileSync(logFilePath, logMessage, 'utf8');
+  } catch (writeErr) {
+    console.warn('[LOG_WRITE_ERROR] Failed to write to error.log:', writeErr.message);
+  }
+}
+
+/**
  * Persist structured error into do_operator_activities (ERROR / SYSTEM_ERROR).
  */
 async function logErrorCheckpoint(err, meta = {}) {
@@ -126,6 +161,9 @@ async function logErrorCheckpoint(err, meta = {}) {
   const description = formatCheckpointDescription(cp);
 
   console.error(`[ERROR] ${cp.status || 500} ${cp.method || '-'} ${cp.url || '-'} | ${cp.type || 'Error'} @ ${cp.file || '?'}:${cp.line ?? '?'} | ${cp.message}`);
+
+  // Record error details to backend/logs/error.log file
+  logToFile(cp, err);
 
   try {
     await logActivity(email, 'SYSTEM_ERROR', 'ERROR', description);

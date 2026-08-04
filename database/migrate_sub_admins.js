@@ -28,7 +28,7 @@ async function migrateSubAdmins() {
       allowed_clients TEXT DEFAULT NULL COMMENT 'Comma-separated client names from DO logs',
       allowed_warehouses TEXT DEFAULT NULL COMMENT 'Comma-separated warehouse names',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      updated_at TIMESTAMP NULL DEFAULT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
 
@@ -40,7 +40,7 @@ async function migrateSubAdmins() {
     { name: 'phone_no', sql: 'ALTER TABLE sub_admins ADD COLUMN phone_no VARCHAR(20) DEFAULT NULL' },
     { name: 'allowed_clients', sql: 'ALTER TABLE sub_admins ADD COLUMN allowed_clients TEXT DEFAULT NULL' },
     { name: 'allowed_warehouses', sql: 'ALTER TABLE sub_admins ADD COLUMN allowed_warehouses TEXT DEFAULT NULL' },
-    { name: 'updated_at', sql: 'ALTER TABLE sub_admins ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' }
+    { name: 'updated_at', sql: 'ALTER TABLE sub_admins ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL' }
   ];
 
   for (const { name, sql } of alters) {

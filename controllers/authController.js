@@ -183,7 +183,8 @@ exports.login = async (req, res) => {
       phone_no: user.phone_no || user.phone || null,
       warehouse_name: user.warehouse_name || user.warehouse || null,
       allowed_clients: user.allowed_clients || null,
-      allowed_warehouses: user.allowed_warehouses || null
+      allowed_warehouses: user.allowed_warehouses || null,
+      chamber_limit: user.chamber_limit || 4
     };
 
     const token = jwt.sign(
@@ -212,6 +213,7 @@ exports.login = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'Logged in successfully.',
+      token,
       user: tokenPayload
     });
   } catch (error) {

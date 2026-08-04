@@ -42,7 +42,7 @@ async function run() {
         inward_damage_boxes_photo TEXT DEFAULT NULL,
         update_details TEXT DEFAULT NULL,
         inward_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        inward_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        inward_updated_at TIMESTAMP NULL DEFAULT NULL
       )
     `);
     console.log("✅ inward_temp_logs table verified/created successfully.");
@@ -88,7 +88,7 @@ async function run() {
         outward_damage_boxes_photo TEXT DEFAULT NULL,
         update_details TEXT DEFAULT NULL,
         outward_created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        outward_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        outward_updated_at TIMESTAMP NULL DEFAULT NULL
       )
     `);
     console.log("✅ outward_temp_logs table verified/created successfully.");
@@ -142,7 +142,7 @@ async function run() {
         allowed_clients TEXT DEFAULT NULL,
         allowed_warehouses TEXT DEFAULT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        updated_at TIMESTAMP NULL DEFAULT NULL
       )
     `);
     console.log("✅ sub_admins table verified/created successfully.");
@@ -154,7 +154,7 @@ async function run() {
       { name: 'phone_no', sql: 'ALTER TABLE sub_admins ADD COLUMN phone_no VARCHAR(20) DEFAULT NULL' },
       { name: 'allowed_clients', sql: 'ALTER TABLE sub_admins ADD COLUMN allowed_clients TEXT DEFAULT NULL' },
       { name: 'allowed_warehouses', sql: 'ALTER TABLE sub_admins ADD COLUMN allowed_warehouses TEXT DEFAULT NULL' },
-      { name: 'updated_at', sql: 'ALTER TABLE sub_admins ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP' }
+      { name: 'updated_at', sql: 'ALTER TABLE sub_admins ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL' }
     ];
     for (const { name, sql } of subAlters) {
       if (!subColNames.includes(name)) {
@@ -175,18 +175,18 @@ async function run() {
     }
 
     // Seed Sub Admin
-    const [subAdminsList] = await db.query("SELECT * FROM sub_admins");
+    const [subAdminsList] = await db.query("SELECT * FROM sub_admins WHERE email = ?", ["subadmin@reeferon.com"]);
     if (subAdminsList.length === 0) {
       const hashedPass = await bcrypt.hash("subadmin123", salt);
-      await db.query("INSERT INTO sub_admins (email, password) VALUES (?, ?)", ["subadmin@reeferon.com", hashedPass]);
+      await db.query("INSERT INTO sub_admins (email, password, full_name) VALUES (?, ?, ?)", ["subadmin@reeferon.com", hashedPass, "Test Sub Admin"]);
       console.log("🌱 Default Sub Admin user seeded (subadmin@reeferon.com / subadmin123).");
     }
 
     // Seed DO Operator
-    const [doOperators] = await db.query("SELECT * FROM do_operators");
+    const [doOperators] = await db.query("SELECT * FROM do_operators WHERE email = ?", ["operator@reeferon.com"]);
     if (doOperators.length === 0) {
       const hashedPass = await bcrypt.hash("operator123", salt);
-      await db.query("INSERT INTO do_operators (email, password) VALUES (?, ?)", ["operator@reeferon.com", hashedPass]);
+      await db.query("INSERT INTO do_operators (email, password, full_name) VALUES (?, ?, ?)", ["operator@reeferon.com", hashedPass, "Test DO Operator"]);
       console.log("🌱 Default DO Operator user seeded (operator@reeferon.com / operator123).");
     }
     

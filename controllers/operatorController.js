@@ -13,7 +13,7 @@ const { sendOperatorCredentialsEmail } = require('../utils/emailService');
 exports.getOperators = async (req, res) => {
   try {
     const [rows] = await db.query(
-      'SELECT id, email, full_name, phone_no, warehouse_name, created_at FROM do_operators ORDER BY id DESC'
+      'SELECT id, email, full_name, phone_no, warehouse_name, chamber_limit, created_at FROM do_operators ORDER BY id DESC'
     );
     return res.json(rows);
   } catch (err) {
@@ -28,10 +28,11 @@ exports.getOperators = async (req, res) => {
 // 2. CREATE NEW OPERATOR
 exports.createOperator = async (req, res) => {
   try {
-    const { email, password, full_name, phone_no, warehouse_name } = req.body;
+    const { email, password, full_name, phone_no, warehouse_name, chamber_limit } = req.body;
     if (!email || !password || !full_name || !phone_no || !warehouse_name) {
       return res.status(400).json({ error: 'All fields (Email, Password, Full Name, Phone No., Warehouse Name) are required.' });
     }
+    const limitVal = chamber_limit ? parseInt(chamber_limit, 10) : 4;
 
     // Check if operator already exists
     const [existing] = await db.query(
@@ -47,8 +48,8 @@ exports.createOperator = async (req, res) => {
     const hashed = await bcrypt.hash(password, salt);
 
     await db.query(
-      'INSERT INTO do_operators (email, password, full_name, phone_no, warehouse_name) VALUES (?, ?, ?, ?, ?)',
-      [email, hashed, full_name, phone_no, warehouse_name]
+      'INSERT INTO do_operators (email, password, full_name, phone_no, warehouse_name, chamber_limit) VALUES (?, ?, ?, ?, ?, ?)',
+      [email, hashed, full_name, phone_no, warehouse_name, limitVal]
     );
 
     // Log the permission change
@@ -105,11 +106,12 @@ exports.createOperator = async (req, res) => {
 exports.updateOperator = async (req, res) => {
   try {
     const { id } = req.params;
-    const { email, password, full_name, phone_no, warehouse_name } = req.body;
+    const { email, password, full_name, phone_no, warehouse_name, chamber_limit } = req.body;
 
     if (!email || !full_name || !phone_no || !warehouse_name) {
       return res.status(400).json({ error: 'All fields (Email, Full Name, Phone No., Warehouse Name) are required.' });
     }
+    const limitVal = chamber_limit ? parseInt(chamber_limit, 10) : 4;
 
     // Check if email belongs to another operator
     const [existing] = await db.query(
@@ -125,13 +127,13 @@ exports.updateOperator = async (req, res) => {
       const salt = await bcrypt.genSalt(10);
       const hashed = await bcrypt.hash(password, salt);
       await db.query(
-        'UPDATE do_operators SET email = ?, password = ?, full_name = ?, phone_no = ?, warehouse_name = ? WHERE id = ?',
-        [email, hashed, full_name, phone_no, warehouse_name, id]
+        'UPDATE do_operators SET email = ?, password = ?, full_name = ?, phone_no = ?, warehouse_name = ?, chamber_limit = ? WHERE id = ?',
+        [email, hashed, full_name, phone_no, warehouse_name, limitVal, id]
       );
     } else {
       await db.query(
-        'UPDATE do_operators SET email = ?, full_name = ?, phone_no = ?, warehouse_name = ? WHERE id = ?',
-        [email, full_name, phone_no, warehouse_name, id]
+        'UPDATE do_operators SET email = ?, full_name = ?, phone_no = ?, warehouse_name = ?, chamber_limit = ? WHERE id = ?',
+        [email, full_name, phone_no, warehouse_name, limitVal, id]
       );
     }
 
