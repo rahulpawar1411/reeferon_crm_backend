@@ -6,6 +6,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
 const rateLimit = require('express-rate-limit');
@@ -146,7 +147,16 @@ app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) {
     return res.status(404).json({ error: 'API route not found' });
   }
-  res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
+  
+  const frontendPath = path.join(__dirname, '../frontend/dist/index.html');
+  if (fs.existsSync(frontendPath)) {
+    res.sendFile(frontendPath);
+  } else {
+    res.json({
+      status: 'Online',
+      message: 'ReeferON CRM API Backend running smoothly. Frontend is served separately.'
+    });
+  }
 });
 
 app.use(require('./utils/errorHandler').globalErrorMiddleware);
