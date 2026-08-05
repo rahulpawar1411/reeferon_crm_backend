@@ -198,7 +198,7 @@ exports.login = async (req, res) => {
     res.cookie('token', token, {
       httpOnly: true,
       secure: isProduction,
-      sameSite: 'strict',
+      sameSite: isProduction ? 'none' : 'lax',
       maxAge: TOKEN_EXPIRY_MS
     });
 
@@ -231,10 +231,11 @@ exports.login = async (req, res) => {
  */
 exports.logout = (req, res) => {
   try {
+    const isProduction = process.env.NODE_ENV === 'production';
     res.clearCookie('token', {
       httpOnly: true,
-      sameSite: 'strict',
-      secure: process.env.NODE_ENV === 'production'
+      sameSite: isProduction ? 'none' : 'lax',
+      secure: isProduction
     });
 
     console.log('🔐 Success: User session cleared successfully.');
@@ -459,7 +460,7 @@ exports.changeSuperAdminPassword = async (req, res) => {
     res.cookie('token', token, {
       httpOnly: true,
       secure: isProduction,
-      sameSite: 'strict',
+      sameSite: isProduction ? 'none' : 'lax',
       maxAge: TOKEN_EXPIRY_MS
     });
 

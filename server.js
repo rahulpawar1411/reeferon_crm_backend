@@ -31,8 +31,14 @@ app.use(helmet({
 }));
 
 // CORS Configuration with Credentials Support (Required for HttpOnly Cookies)
+const allowedOrigins = ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000'];
+if (process.env.FRONTEND_URL) {
+  const origins = process.env.FRONTEND_URL.split(',').map(url => url.trim());
+  allowedOrigins.push(...origins);
+}
+
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000'],
+  origin: allowedOrigins,
   credentials: true
 }));
 

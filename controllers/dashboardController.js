@@ -244,7 +244,7 @@ exports.getInventoryReconciliation = async (req, res) => {
  */
 exports.getDailyInventoryDeltas = async (req, res) => {
   try {
-    const { warehouse } = req.query;
+    const { warehouse, fromDate, toDate } = req.query;
     let sql = `
       SELECT id, DATE_FORMAT(entry_date, '%Y-%m-%d') AS entry_date, client_name, chamber_name, warehouse_name, box_count 
       FROM daily_chamber_temp_logs 
@@ -278,14 +278,58 @@ exports.getDailyInventoryDeltas = async (req, res) => {
       const client_name = parts[0];
       const chamber_name = parts[1];
       const warehouse_name = parts[2];
-      const groupLogs = groups[key];
+      const groupLogs = groups[key]; // Sorted descending (newest first)
 
       if (groupLogs.length > 0) {
-        const latest = groupLogs[0];
-        const prev = groupLogs.length > 1 ? groupLogs[1] : null;
+        // Find the index of the first log that falls within the selected date range
+        let indexOfLatest = -1;
+        for (let i = 0; i < groupLogs.length; i++) {
+          const entryDate = groupLogs[i].entry_date;
+          let inRange = true;
+          if (fromDate && entryDate < fromDate) inRange = false;
+          if (toDate && entryDate > toDate) inRange = false;
+          
+          if (inRange) {
+            indexOfLatest = i;
+            break;
+          }
+        }
+
+        // If a date range was selected and no audit falls inside it, skip this client/chamber
+        if ((fromDate || toDate) && indexOfLatest === -1) {
+          return;
+        }
+
+        // If no filter is matched, indexOfLatest is simply 0 (latest log of all time)
+        if (indexOfLatest === -1) {
+          indexOfLatest = 0;
+        }
+
+        const latest = groupLogs[indexOfLatest];
+        const prev = indexOfLatest + 1 < groupLogs.length ? groupLogs[indexOfLatest + 1] : null;
 
         const latest_count = latest.box_count || 0;
         const prev_count = prev ? (prev.box_count || 0) : 0;
+
+        // Retrieve audits based on selected calendar date filters, else fallback to last 5
+        let historyLogs = [];
+        if (fromDate || toDate) {
+          historyLogs = groupLogs.filter(g => {
+            const entryDate = g.entry_date;
+            if (fromDate && entryDate < fromDate) return false;
+            if (toDate && entryDate > toDate) return false;
+            return true;
+          });
+        } else {
+          historyLogs = groupLogs.slice(0, 5);
+        }
+
+        const history = historyLogs
+          .map(g => ({
+            date: g.entry_date,
+            count: g.box_count || 0
+          }))
+          .reverse();
 
         deltas.push({
           client_name,
@@ -295,7 +339,8 @@ exports.getDailyInventoryDeltas = async (req, res) => {
           latest_count: latest_count,
           prev_date: prev ? prev.entry_date : null,
           prev_count: prev_count,
-          delta: latest_count - prev_count
+          delta: latest_count - prev_count,
+          history: history
         });
       }
     });
