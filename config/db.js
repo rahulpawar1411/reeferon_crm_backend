@@ -402,7 +402,7 @@ async function testDbConnection() {
           remark TEXT DEFAULT NULL,
           status VARCHAR(50) DEFAULT 'active',
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NULL DEFAULT NULL,
           FOREIGN KEY (chamber_id) REFERENCES chambers(id) ON DELETE CASCADE,
           UNIQUE KEY uq_chamber_client_wh (chamber_id, client_name, warehouse_name)
         )
@@ -441,7 +441,7 @@ async function testDbConnection() {
       }
 
       if (!colNames.includes('updated_at')) {
-        await pool.query('ALTER TABLE chamber_client_assignments ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+        await pool.query('ALTER TABLE chamber_client_assignments ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL');
         console.log('🌱 Added column updated_at to chamber_client_assignments.');
       }
       // No default Amul/HyFun/etc. assignment seed — keep empty for live data only

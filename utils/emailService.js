@@ -128,22 +128,33 @@ async function sendEmail({ to, subject, html, text }) {
     host,
     port,
     secure,
-    auth: { user, pass }
+    auth: { user, pass },
+    connectionTimeout: 12000,
+    greetingTimeout: 12000,
+    socketTimeout: 15000
   });
 
   try {
     console.log(`📧 Sending credentials email to ${to} via SMTP ${host}:${port} from ${from}…`);
-    const info = await transporter.sendMail({
-      from,
-      to,
-      subject,
-      text: text || undefined,
-      html
-    });
+    const info = await Promise.race([
+      transporter.sendMail({
+        from,
+        to,
+        subject,
+        text: text || undefined,
+        html
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Email send timed out after 15s')), 15000)
+      )
+    ]);
     console.log(`📧 Email sent to ${to} (id: ${info.messageId || 'n/a'})`);
     return { sent: true, id: info.messageId || null };
   } catch (err) {
     console.error('❌ SMTP email error:', err.message);
+    try {
+      transporter.close();
+    } catch (_) {}
     return { sent: false, error: err.message };
   }
 }

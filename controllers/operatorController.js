@@ -60,39 +60,36 @@ exports.createOperator = async (req, res) => {
       `Registered operator profile: ${email} (Warehouse: ${warehouse_name})`
     );
 
-    // Send login credentials to operator email (non-blocking for account creation)
-    const emailResult = await sendOperatorCredentialsEmail({
-      email: String(email).trim().toLowerCase(),
-      password,
-      full_name,
-      phone_no,
-      warehouse_name
+    // Respond immediately — do not wait for SMTP (Render free tier times out ~30s)
+    res.status(201).json({
+      message: 'Data operator created successfully. Login credentials email is being sent.',
+      emailSent: null,
+      emailQueued: true
     });
 
-    if (emailResult.sent) {
-      await logActivity(
-        req.user?.email || 'super_admin',
-        'EMAIL_SENT',
-        'SECURITY',
-        `Credentials email sent to DO: ${email}`
-      );
-    } else {
-      await logActivity(
-        req.user?.email || 'super_admin',
-        'EMAIL_FAILED',
-        'SECURITY',
-        `Credentials email NOT sent to DO: ${email} (${emailResult.error || 'unknown'})`
-      );
-    }
-
-    return res.status(201).json({
-      message: emailResult.sent
-        ? 'Data operator created successfully. Login credentials emailed.'
-        : 'Data operator created successfully, but credentials email could not be sent.',
-      emailSent: !!emailResult.sent,
-      emailSkipped: !!emailResult.skipped,
-      emailError: emailResult.sent ? null : (emailResult.error || null)
+    // Background credentials email (after response)
+    setImmediate(async () => {
+      try {
+        const emailResult = await sendOperatorCredentialsEmail({
+          email: String(email).trim().toLowerCase(),
+          password,
+          full_name,
+          phone_no,
+          warehouse_name
+        });
+        await logActivity(
+          req.user?.email || 'super_admin',
+          emailResult.sent ? 'EMAIL_SENT' : 'EMAIL_FAILED',
+          'SECURITY',
+          emailResult.sent
+            ? `Credentials email sent to DO: ${email}`
+            : `Credentials email NOT sent to DO: ${email} (${emailResult.error || 'unknown'})`
+        );
+      } catch (mailErr) {
+        console.error('❌ Background DO credentials email failed:', mailErr.message);
+      }
     });
+    return;
   } catch (err) {
     return handleControllerError(res, err, {
       checkpoint: 'createOperator',

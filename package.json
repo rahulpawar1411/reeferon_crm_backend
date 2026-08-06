@@ -8,6 +8,7 @@
     "start": "node server.js",
     "dev": "node server.js",
     "db:update": "node database/update_db.js",
+    "db:clear-keep-super-admin": "node database/clearKeepSuperAdmin.js",
     "db:migrate-sub-admins": "node database/migrate_sub_admins.js"
   },
   "keywords": [

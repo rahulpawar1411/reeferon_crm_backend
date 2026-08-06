@@ -67,39 +67,36 @@ exports.createSubAdmin = async (req, res) => {
       `Registered sub-admin profile: ${cleanEmail} | Access: Clients=[${clientsStr || 'All'}] Warehouses=[${warehousesStr || 'All'}]`
     );
 
-    const emailResult = await sendSubAdminCredentialsEmail({
-      email: cleanEmail,
-      password,
-      full_name: cleanFullName,
-      phone_no: cleanPhone,
-      allowed_clients: clientsStr,
-      allowed_warehouses: warehousesStr
+    // Respond immediately — do not wait for SMTP (Render free tier times out ~30s)
+    res.status(201).json({
+      message: 'Sub-admin created successfully. Login credentials email is being sent.',
+      emailSent: null,
+      emailQueued: true
     });
 
-    if (emailResult.sent) {
-      await logActivity(
-        req.user?.email || 'super_admin',
-        'EMAIL_SENT',
-        'SECURITY',
-        `Credentials email sent to Sub-Admin: ${cleanEmail}`
-      );
-    } else {
-      await logActivity(
-        req.user?.email || 'super_admin',
-        'EMAIL_FAILED',
-        'SECURITY',
-        `Credentials email NOT sent to Sub-Admin: ${cleanEmail} (${emailResult.error || 'unknown'})`
-      );
-    }
-
-    return res.status(201).json({
-      message: emailResult.sent
-        ? 'Sub-admin created successfully. Login credentials emailed.'
-        : 'Sub-admin created successfully, but credentials email could not be sent.',
-      emailSent: !!emailResult.sent,
-      emailSkipped: !!emailResult.skipped,
-      emailError: emailResult.sent ? null : (emailResult.error || null)
+    setImmediate(async () => {
+      try {
+        const emailResult = await sendSubAdminCredentialsEmail({
+          email: cleanEmail,
+          password,
+          full_name: cleanFullName,
+          phone_no: cleanPhone,
+          allowed_clients: clientsStr,
+          allowed_warehouses: warehousesStr
+        });
+        await logActivity(
+          req.user?.email || 'super_admin',
+          emailResult.sent ? 'EMAIL_SENT' : 'EMAIL_FAILED',
+          'SECURITY',
+          emailResult.sent
+            ? `Credentials email sent to Sub-Admin: ${cleanEmail}`
+            : `Credentials email NOT sent to Sub-Admin: ${cleanEmail} (${emailResult.error || 'unknown'})`
+        );
+      } catch (mailErr) {
+        console.error('❌ Background Sub-Admin credentials email failed:', mailErr.message);
+      }
     });
+    return;
   } catch (err) {
     const detail = err.code === 'ER_DUP_ENTRY'
       ? 'Sub-Admin email already exists.'
