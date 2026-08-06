@@ -14,49 +14,46 @@ const { handleControllerError } = require('../utils/errorHandler');
 exports.getPermissionRequests = async (req, res) => {
   try {
     let rows;
-    if (req.user.role === 'super_admin') {
-      [rows] = await db.query(`
+    const selectCols = `
         SELECT a.id, a.operator_email, a.log_type AS record_type, a.permission_req AS record_id, a.action AS raw_action,
                CASE 
                  WHEN a.action IN ('REQUEST_EDIT', 'REQUEST_DELETE') THEN 'Pending'
                  WHEN a.action IN ('GRANT_PERMISSION', 'GRANT_DELETE') THEN 'Approved'
+                 WHEN a.action IN ('USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION') THEN 'Used'
                  ELSE 'Denied'
                END AS status,
                a.description, a.created_at, a.do_action_completed_at,
-               r.description AS request_description
+               r.description AS request_description,
+               c.chamber_id, c.chamber_name, c.client_name, c.shift, c.entry_date,
+               c.reference_no AS log_reference_no
         FROM do_operator_activities a
         LEFT JOIN do_operator_activities r ON r.operator_email = a.operator_email 
           AND r.log_type = a.log_type 
           AND r.permission_req = a.permission_req
           AND r.action IN ('REQUEST_EDIT', 'REQUEST_DELETE')
+        LEFT JOIN daily_chamber_temp_logs c
+          ON a.log_type = 'Chamber' AND c.id = a.permission_req
+    `;
+
+    if (req.user.role === 'super_admin') {
+      [rows] = await db.query(`
+        ${selectCols}
         WHERE a.id IN (
           SELECT MAX(id)
           FROM do_operator_activities
-          WHERE action IN ('REQUEST_EDIT', 'REQUEST_DELETE', 'GRANT_PERMISSION', 'GRANT_DELETE', 'DENY_PERMISSION', 'DENY_DELETE')
+          WHERE action IN ('REQUEST_EDIT', 'REQUEST_DELETE', 'GRANT_PERMISSION', 'GRANT_DELETE', 'DENY_PERMISSION', 'DENY_DELETE', 'USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION')
           GROUP BY operator_email, log_type, permission_req
         )
         ORDER BY a.id DESC
       `);
     } else {
       [rows] = await db.query(`
-        SELECT a.id, a.operator_email, a.log_type AS record_type, a.permission_req AS record_id, a.action AS raw_action,
-               CASE 
-                 WHEN a.action IN ('REQUEST_EDIT', 'REQUEST_DELETE') THEN 'Pending'
-                 WHEN a.action IN ('GRANT_PERMISSION', 'GRANT_DELETE') THEN 'Approved'
-                 ELSE 'Denied'
-               END AS status,
-               a.description, a.created_at, a.do_action_completed_at,
-               r.description AS request_description
-        FROM do_operator_activities a
-        LEFT JOIN do_operator_activities r ON r.operator_email = a.operator_email 
-          AND r.log_type = a.log_type 
-          AND r.permission_req = a.permission_req
-          AND r.action IN ('REQUEST_EDIT', 'REQUEST_DELETE')
+        ${selectCols}
         WHERE a.operator_email = ? 
           AND a.id IN (
             SELECT MAX(id)
             FROM do_operator_activities
-            WHERE action IN ('REQUEST_EDIT', 'REQUEST_DELETE', 'GRANT_PERMISSION', 'GRANT_DELETE', 'DENY_PERMISSION', 'DENY_DELETE')
+            WHERE action IN ('REQUEST_EDIT', 'REQUEST_DELETE', 'GRANT_PERMISSION', 'GRANT_DELETE', 'DENY_PERMISSION', 'DENY_DELETE', 'USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION')
             GROUP BY operator_email, log_type, permission_req
           )
         ORDER BY a.id DESC
@@ -190,32 +187,53 @@ exports.updatePermissionRequestStatus = async (req, res) => {
       targetAction = isEdit ? 'DENY_PERMISSION' : 'DENY_DELETE';
     }
 
-    // Fetch target record's reference_no
-    let approvalRefQuery = '';
-    if (record_type === 'Chamber') {
-      approvalRefQuery = 'SELECT reference_no FROM daily_chamber_temp_logs WHERE id = ? LIMIT 1';
-    } else if (record_type === 'Inward') {
-      approvalRefQuery = 'SELECT reference_no FROM inward_temp_logs WHERE inward_id = ? LIMIT 1';
-    } else if (record_type === 'Outward') {
-      approvalRefQuery = 'SELECT reference_no FROM outward_temp_logs WHERE outward_id = ? LIMIT 1';
-    }
-    
+    // Fetch target record details for a clear DO notification message
     let approvalRefNo = '';
-    if (approvalRefQuery) {
-      const [approvalRefRows] = await db.query(approvalRefQuery, [record_id]);
+    let chamberName = '';
+    let clientName = '';
+    let shiftName = '';
+
+    if (record_type === 'Chamber') {
+      const [approvalRefRows] = await db.query(
+        `SELECT reference_no, chamber_name, client_name, shift
+         FROM daily_chamber_temp_logs WHERE id = ? LIMIT 1`,
+        [record_id]
+      );
       if (approvalRefRows.length > 0) {
-        approvalRefNo = approvalRefRows[0].reference_no;
+        approvalRefNo = approvalRefRows[0].reference_no || '';
+        chamberName = approvalRefRows[0].chamber_name || '';
+        clientName = approvalRefRows[0].client_name || '';
+        shiftName = approvalRefRows[0].shift || '';
       }
+    } else if (record_type === 'Inward') {
+      const [approvalRefRows] = await db.query(
+        'SELECT reference_no FROM inward_temp_logs WHERE inward_id = ? LIMIT 1',
+        [record_id]
+      );
+      if (approvalRefRows.length > 0) approvalRefNo = approvalRefRows[0].reference_no || '';
+    } else if (record_type === 'Outward') {
+      const [approvalRefRows] = await db.query(
+        'SELECT reference_no FROM outward_temp_logs WHERE outward_id = ? LIMIT 1',
+        [record_id]
+      );
+      if (approvalRefRows.length > 0) approvalRefNo = approvalRefRows[0].reference_no || '';
     }
-    const approvalRefText = approvalRefNo ? approvalRefNo : `#${record_id}`;
+
     const actionWord = isEdit ? 'Edit' : 'Delete';
     const outcome = status === 'Approved' ? 'approved' : 'denied';
+    const detailParts = [
+      chamberName,
+      clientName,
+      shiftName,
+      approvalRefNo || `#${record_id}`
+    ].filter(Boolean);
+    const approvalMessage = `${actionWord} ${outcome} · ${detailParts.join(' · ')}`;
 
     await logActivity(
       operator_email,
       targetAction,
       record_type,
-      `${actionWord} ${outcome} · ${approvalRefText}`,
+      approvalMessage,
       record_id
     );
 
@@ -249,7 +267,9 @@ exports.markPermissionActionComplete = async (req, res) => {
       'GRANT_PERMISSION',
       'GRANT_DELETE',
       'DENY_PERMISSION',
-      'DENY_DELETE'
+      'DENY_DELETE',
+      'USE_EDIT_PERMISSION',
+      'USE_DELETE_PERMISSION'
     ];
     if (!allowedActions.includes(row.action)) {
       return res.status(400).json({ error: 'This activity cannot be marked complete.' });
@@ -320,6 +340,7 @@ exports.checkPermission = async (req, res) => {
     const reqActionType = action === 'Edit' ? 'REQUEST_EDIT' : 'REQUEST_DELETE';
     const grantActionType = action === 'Edit' ? 'GRANT_PERMISSION' : 'GRANT_DELETE';
     const denyActionType = action === 'Edit' ? 'DENY_PERMISSION' : 'DENY_DELETE';
+    const useActionType = action === 'Edit' ? 'USE_EDIT_PERMISSION' : 'USE_DELETE_PERMISSION';
 
     const [rows] = await db.query(`
       SELECT action, id, description FROM do_operator_activities
@@ -336,6 +357,7 @@ exports.checkPermission = async (req, res) => {
     if (latest.action === reqActionType) calculatedStatus = 'Pending';
     else if (latest.action === grantActionType) calculatedStatus = 'Approved';
     else if (latest.action === denyActionType) calculatedStatus = 'Denied';
+    else if (latest.action === useActionType) calculatedStatus = 'Used';
 
     return res.json({
       approved: latest.action === grantActionType,
@@ -357,6 +379,64 @@ exports.checkPermission = async (req, res) => {
       clientMessage: 'Failed to check permission.'
     });
   }
+};
+
+/**
+ * One-time grant: after DO successfully edits/deletes, mark permission as used
+ * so another Super Admin approval is required for the next change.
+ */
+exports.consumeGrantedPermission = async (operatorEmail, recordType, recordId, action = 'Edit') => {
+  if (!operatorEmail || !recordType || !recordId) return false;
+
+  const grantActionType = action === 'Edit' ? 'GRANT_PERMISSION' : 'GRANT_DELETE';
+  const useActionType = action === 'Edit' ? 'USE_EDIT_PERMISSION' : 'USE_DELETE_PERMISSION';
+
+  const [rows] = await db.query(
+    `SELECT action FROM do_operator_activities
+     WHERE operator_email = ? AND log_type = ? AND permission_req = ?
+     ORDER BY id DESC LIMIT 1`,
+    [operatorEmail, recordType, recordId]
+  );
+
+  if (!rows.length || rows[0].action !== grantActionType) {
+    return false;
+  }
+
+  const actionWord = action === 'Edit' ? 'Edit' : 'Delete';
+  await logActivity(
+    operatorEmail,
+    useActionType,
+    recordType,
+    `${actionWord} used · #${recordId}`,
+    recordId
+  );
+  return true;
+};
+
+/**
+ * Returns true if DO may proceed (system Allow, or active GRANT not yet used).
+ * Super Admin / Sub Admin callers should not use this gate.
+ */
+exports.hasActivePermission = async (operatorEmail, recordType, recordId, action = 'Edit') => {
+  const configKey = `${recordType}_${action}`;
+  const [configRows] = await db.query(
+    `SELECT description FROM do_operator_activities
+     WHERE operator_email = 'system' AND log_type = 'SYSTEM_CONFIG' AND action = ?
+     ORDER BY id DESC LIMIT 1`,
+    [configKey]
+  );
+  if (configRows.length > 0 && configRows[0].description === 'Allow') {
+    return true;
+  }
+
+  const grantActionType = action === 'Edit' ? 'GRANT_PERMISSION' : 'GRANT_DELETE';
+  const [rows] = await db.query(
+    `SELECT action FROM do_operator_activities
+     WHERE operator_email = ? AND log_type = ? AND permission_req = ?
+     ORDER BY id DESC LIMIT 1`,
+    [operatorEmail, recordType, recordId]
+  );
+  return rows.length > 0 && rows[0].action === grantActionType;
 };
 
 // 5. GET SYSTEM PERMISSION CONFIG

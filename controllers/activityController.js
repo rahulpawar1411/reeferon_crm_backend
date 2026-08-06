@@ -32,12 +32,17 @@ exports.getActivityLogs = async (req, res) => {
         OR (a.description IS NOT NULL AND a.description LIKE '%[CHECKPOINT]%')
       )`);
     } else if (cat === 'do_changes') {
-      conditions.push(`(a.action IN ('ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT', 'ADD_CHAMBER', 'DELETE_CHAMBER'))`);
+      // DO client/chamber add-delete ops (mobile report + assignment sync)
+      conditions.push(`(
+        a.action IN ('ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT', 'ADD_CHAMBER', 'DELETE_CHAMBER')
+        OR (a.log_type = 'Chamber Client Assignment' AND a.action IN ('CREATE', 'DELETE', 'ADD_CLIENT', 'DELETE_CLIENT'))
+      )`);
     } else {
       // Operator activity trail (exclude security / system / error rows AND exclude do_changes to keep general activity clean)
       conditions.push(`(
         (a.log_type IS NULL OR a.log_type NOT IN ('PERMISSION', 'SECURITY', 'ERROR', 'SYSTEM'))
         AND (a.action IS NULL OR a.action NOT IN ('SYSTEM_ERROR', 'ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT', 'ADD_CHAMBER', 'DELETE_CHAMBER'))
+        AND NOT (a.log_type = 'Chamber Client Assignment' AND a.action IN ('CREATE', 'DELETE'))
       )`);
     }
 
@@ -118,7 +123,8 @@ exports.getActivityLogs = async (req, res) => {
 
 exports.createActivityLog = async (req, res) => {
   try {
-    const { action, log_type = 'activity', description } = req.body;
+    const { action, description } = req.body;
+    const log_type = req.body.log_type || req.body.logType || 'activity';
     if (!action || !description) {
       return res.status(400).json({ success: false, message: 'Action and Description are required.' });
     }

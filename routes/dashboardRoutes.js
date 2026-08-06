@@ -13,6 +13,9 @@ router.get('/', dashboardController.getDashboardStats);
 // GET /api/dashboard/access-options - Fetch distinct clients & warehouses for sub-admin scope
 router.get('/access-options', dashboardController.getAccessScopeOptions);
 
+// GET /api/dashboard/inventory-filter-options - Live warehouse → client lists from DB
+router.get('/inventory-filter-options', dashboardController.getInventoryFilterOptions);
+
 // GET /api/dashboard/inventory-reconciliation - Fetch inventory box calculations and discrepancies
 router.get('/inventory-reconciliation', dashboardController.getInventoryReconciliation);
 

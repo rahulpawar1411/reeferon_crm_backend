@@ -120,13 +120,15 @@ exports.getChambers = async (req, res) => {
 // 2. Fetch all active client chamber assignments (Admin managed)
 exports.getAssignments = async (req, res) => {
   try {
+    const warehouse_name = req.user ? req.user.warehouse_name : null;
     const query = `
       SELECT cca.chamber_id, c.name AS chamber_name, cca.client_name
       FROM chamber_client_assignments cca
       JOIN chambers c ON cca.chamber_id = c.id
+      WHERE (cca.warehouse_name = ? OR cca.warehouse_name IS NULL) AND cca.status = 'active'
       ORDER BY c.name ASC, cca.client_name ASC
     `;
-    const [rows] = await db.query(query);
+    const [rows] = await db.query(query, [warehouse_name]);
 
     // Filter assignments for Data Operators based on their assigned chamber limit
     let filteredRows = rows;
@@ -165,7 +167,8 @@ exports.getAssignments = async (req, res) => {
 // 3. Log a daily chamber client box temperature inspection (DO Operator Submission)
 exports.addInspection = async (req, res) => {
   try {
-    const { operator_name, chamber_id, client_name, entry_date, entry_time, box_temp, box_count, chamber_type, overdue_time, photo_capture_time: bodyCaptureTime } = req.body;
+    const { operator_name, chamber_id, client_name, entry_date, entry_time, box_temp, box_count, chamber_type, overdue_time, photo_capture_time: bodyCaptureTime, created_at } = req.body;
+    const localTimestamp = formatDateTime(new Date());
 
     // Validation checks
     if (!operator_name || !chamber_id || !client_name || !entry_date || !entry_time || box_temp === undefined) {
@@ -176,7 +179,13 @@ exports.addInspection = async (req, res) => {
     }
 
     const tempVal = parseFloat(box_temp);
-    const boxCountVal = box_count !== undefined && box_count !== null && box_count !== '' ? parseInt(box_count, 10) : null;
+    let boxCountVal = box_count !== undefined && box_count !== null && box_count !== '' ? parseInt(box_count, 10) : null;
+    if (boxCountVal !== null && (Number.isNaN(boxCountVal) || boxCountVal < 0)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Box quantity cannot be negative. Enter 0 or a positive count.'
+      });
+    }
     
     // Resolve chamber_name from chamber_id
     const [chamberRows] = await db.query('SELECT name FROM chambers WHERE id = ? LIMIT 1', [chamber_id]);
@@ -184,14 +193,16 @@ exports.addInspection = async (req, res) => {
 
     // Programmatic duplicate check to prevent double submissions on the same shift today
     const [existing] = await db.query(
-      `SELECT id FROM daily_chamber_temp_logs 
+      `SELECT id, reference_no FROM daily_chamber_temp_logs 
        WHERE entry_date = ? AND chamber_name = ? AND client_name = ? AND inspection_time = ? LIMIT 1`,
       [entry_date, chamber_name, client_name, entry_time]
     );
     if (existing.length > 0) {
       return res.status(409).json({
         success: false,
-        message: 'Duplicate submission: A temperature log for this client in this chamber has already been recorded today.'
+        message: 'Duplicate submission: A temperature log for this client in this chamber has already been recorded today.',
+        logId: existing[0].id,
+        reference_no: existing[0].reference_no || null
       });
     }
 
@@ -232,10 +243,27 @@ exports.addInspection = async (req, res) => {
 
     const sql = `
       INSERT INTO daily_chamber_temp_logs 
-      (entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, warehouse_name, operator_email, is_native, box_count, chamber_type, overdue_time, photo_capture_time, time_variance_minutes, shift)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+      (entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, warehouse_name, operator_email, is_native, box_count, chamber_type, overdue_time, photo_capture_time, time_variance_minutes, shift, chamber_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     
+    const resolveNativeShift = (shift, entryTime) => {
+      const s = String(shift || '').trim();
+      if (/^morning$/i.test(s)) return 'Morning';
+      if (/^evening$/i.test(s)) return 'Evening';
+      const t = String(entryTime || '').trim().toUpperCase();
+      if (t.startsWith('10:00') || t === '10:00 AM') return 'Morning';
+      if (t.startsWith('16:00') || t.startsWith('18:00')) return 'Evening';
+      const hm = t.match(/^(\d{1,2}):(\d{2})/);
+      if (hm) {
+        let h = parseInt(hm[1], 10);
+        if (t.includes('PM') && h < 12) h += 12;
+        if (t.includes('AM') && h === 12) h = 0;
+        return h < 14 ? 'Morning' : 'Evening';
+      }
+      return 'Morning';
+    };
+
     const params = [
       entry_date,
       client_name,
@@ -251,7 +279,10 @@ exports.addInspection = async (req, res) => {
       overdue_time || 'same day',
       photo_capture_time,
       time_variance_minutes,
-      req.body.shift || (entry_time === '10:00 AM' ? 'Morning' : 'Evening')
+      resolveNativeShift(req.body.shift, entry_time),
+      chamber_id ? parseInt(chamber_id, 10) : null,
+      created_at || localTimestamp,
+      localTimestamp
     ];
 
     const [result] = await db.query(sql, params);
@@ -386,6 +417,112 @@ exports.deleteInspection = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to delete inspection.',
+      error: error.message
+    });
+  }
+};
+
+// 5. Add a new chamber-client assignment locally synced from DO Operator
+exports.addAssignment = async (req, res) => {
+  try {
+    const { chamber_id, client_name, remark } = req.body;
+    const warehouse_name = req.user ? req.user.warehouse_name : null;
+
+    if (!chamber_id || !client_name) {
+      return res.status(400).json({
+        success: false,
+        message: 'Chamber ID and Client Name are required.'
+      });
+    }
+
+    // Resolve chamber name
+    const [chamberRows] = await db.query('SELECT name FROM chambers WHERE id = ? LIMIT 1', [chamber_id]);
+    const chamber_name = chamberRows[0] ? chamberRows[0].name : `Chamber ${chamber_id}`;
+
+    // Insert or update to active status
+    await db.query(
+      "INSERT INTO chamber_client_assignments (chamber_id, client_name, warehouse_name, remark, status) VALUES (?, ?, ?, ?, 'active') ON DUPLICATE KEY UPDATE remark = VALUES(remark), status = 'active'",
+      [chamber_id, client_name, warehouse_name, remark || null]
+    );
+
+    // Write Activity Log
+    try {
+      const email = req.user ? req.user.email : 'system';
+      const actorLabel = req.user ? (req.user.full_name || email) : 'System';
+      const whLabel = warehouse_name ? ` (Warehouse: ${warehouse_name})` : '';
+      await logActivity(
+        email,
+        'ADD_CLIENT',
+        'Chamber Client Assignment',
+        `${actorLabel}${whLabel} Added client "${client_name}" to ${chamber_name}. Remark: ${remark || 'None'}`
+      );
+    } catch (actErr) {
+      console.warn('⚠️ Failed to write operator activity log for assignment creation:', actErr.message);
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Assignment added successfully.'
+    });
+  } catch (error) {
+    console.error('Error adding assignment:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to add assignment.',
+      error: error.message
+    });
+  }
+};
+
+// 6. Delete/remove a chamber-client assignment locally synced from DO Operator
+exports.deleteAssignment = async (req, res) => {
+  try {
+    const chamber_id = req.body.chamber_id || req.query.chamber_id;
+    const client_name = req.body.client_name || req.query.client_name;
+    const remark = req.body.remark || req.query.remark;
+    const warehouse_name = req.user ? req.user.warehouse_name : null;
+
+    if (!chamber_id || !client_name) {
+      return res.status(400).json({
+        success: false,
+        message: 'Chamber ID and Client Name are required.'
+      });
+    }
+
+    // Resolve chamber name
+    const [chamberRows] = await db.query('SELECT name FROM chambers WHERE id = ? LIMIT 1', [chamber_id]);
+    const chamber_name = chamberRows[0] ? chamberRows[0].name : `Chamber ${chamber_id}`;
+
+    // Soft delete mapping in MySQL
+    await db.query(
+      "UPDATE chamber_client_assignments SET status = 'inactive', remark = ? WHERE chamber_id = ? AND client_name = ? AND (warehouse_name = ? OR warehouse_name IS NULL)",
+      [remark || '', chamber_id, client_name, warehouse_name]
+    );
+
+    // Write Activity Log
+    try {
+      const email = req.user ? req.user.email : 'system';
+      const actorLabel = req.user ? (req.user.full_name || email) : 'System';
+      const whLabel = warehouse_name ? ` (Warehouse: ${warehouse_name})` : '';
+      await logActivity(
+        email,
+        'DELETE_CLIENT',
+        'Chamber Client Assignment',
+        `${actorLabel}${whLabel} Deleted client "${client_name}" from ${chamber_name}. Remark: ${remark || 'None'}`
+      );
+    } catch (actErr) {
+      console.warn('⚠️ Failed to write operator activity log for assignment deletion:', actErr.message);
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Assignment removed successfully.'
+    });
+  } catch (error) {
+    console.error('Error deleting assignment:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete assignment.',
       error: error.message
     });
   }

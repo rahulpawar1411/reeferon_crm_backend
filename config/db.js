@@ -337,6 +337,7 @@ async function testDbConnection() {
           entry_date DATE NOT NULL,
           client_name VARCHAR(150) NOT NULL,
           chamber_name VARCHAR(100) NOT NULL,
+          chamber_id INT DEFAULT NULL,
           inspection_time VARCHAR(50) NOT NULL,
           box_temp DECIMAL(4,1) NOT NULL,
           monitor_supervisor_name VARCHAR(150) NOT NULL,
@@ -386,13 +387,7 @@ async function testDbConnection() {
         )
       `);
       console.log('🌱 Verified chambers table is online.');
-      
-      // Seed default chambers if empty
-      const [chamberRows] = await pool.query('SELECT COUNT(*) AS cnt FROM chambers');
-      if (chamberRows[0].cnt === 0) {
-        await pool.query("INSERT INTO chambers (name) VALUES ('Chamber 1'), ('Chamber 2'), ('Chamber 3'), ('Chamber 4')");
-        console.log('🌱 Seeded default chambers.');
-      }
+      // No default chamber seed — keep empty until Super Admin / DO adds real data
     } catch (chErr) {
       console.warn('⚠️ Table chambers creation failed:', chErr.message);
     }
@@ -403,28 +398,53 @@ async function testDbConnection() {
           id INT AUTO_INCREMENT PRIMARY KEY,
           chamber_id INT NOT NULL,
           client_name VARCHAR(150) NOT NULL,
+          warehouse_name VARCHAR(150) DEFAULT NULL,
+          remark TEXT DEFAULT NULL,
+          status VARCHAR(50) DEFAULT 'active',
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
           FOREIGN KEY (chamber_id) REFERENCES chambers(id) ON DELETE CASCADE,
-          UNIQUE KEY uq_chamber_client (chamber_id, client_name)
+          UNIQUE KEY uq_chamber_client_wh (chamber_id, client_name, warehouse_name)
         )
       `);
       console.log('🌱 Verified chamber_client_assignments table is online.');
 
-      // Seed assignments if empty
-      const [assignRows] = await pool.query('SELECT COUNT(*) AS cnt FROM chamber_client_assignments');
-      if (assignRows[0].cnt === 0) {
-        const [chambers] = await pool.query('SELECT id, name FROM chambers');
-        const c1 = chambers.find(c => c.name === 'Chamber 1')?.id;
-        const c2 = chambers.find(c => c.name === 'Chamber 2')?.id;
-        const c3 = chambers.find(c => c.name === 'Chamber 3')?.id;
-        const c4 = chambers.find(c => c.name === 'Chamber 4')?.id;
-
-        if (c1) await pool.query(`INSERT INTO chamber_client_assignments (chamber_id, client_name) VALUES (${c1}, 'Amul'), (${c1}, 'HyFun')`);
-        if (c2) await pool.query(`INSERT INTO chamber_client_assignments (chamber_id, client_name) VALUES (${c2}, 'Mother Dairy')`);
-        if (c3) await pool.query(`INSERT INTO chamber_client_assignments (chamber_id, client_name) VALUES (${c3}, 'Kwality Walls')`);
-        if (c4) await pool.query(`INSERT INTO chamber_client_assignments (chamber_id, client_name) VALUES (${c4}, 'Baskin Robbins'), (${c4}, 'Creambell')`);
-        console.log('🌱 Seeded default chamber-client assignments.');
+      // Check and add warehouse_name dynamically if table already exists
+      const [columns] = await pool.query('SHOW COLUMNS FROM chamber_client_assignments');
+      const colNames = columns.map(c => c.Field);
+      
+      if (!colNames.includes('warehouse_name')) {
+        await pool.query('ALTER TABLE chamber_client_assignments ADD COLUMN warehouse_name VARCHAR(150) DEFAULT NULL');
+        console.log('🌱 Added column warehouse_name to chamber_client_assignments.');
+        
+        // Also drop old unique key if it exists
+        try {
+          await pool.query('ALTER TABLE chamber_client_assignments DROP INDEX uq_chamber_client');
+          console.log('🌱 Dropped deprecated unique index uq_chamber_client.');
+        } catch (idxErr) {}
+        
+        // And add new unique constraint
+        try {
+          await pool.query('ALTER TABLE chamber_client_assignments ADD UNIQUE KEY uq_chamber_client_wh (chamber_id, client_name, warehouse_name)');
+          console.log('🌱 Added unique index uq_chamber_client_wh.');
+        } catch (idxErr) {}
       }
+
+      if (!colNames.includes('remark')) {
+        await pool.query('ALTER TABLE chamber_client_assignments ADD COLUMN remark TEXT DEFAULT NULL');
+        console.log('🌱 Added column remark to chamber_client_assignments.');
+      }
+
+      if (!colNames.includes('status')) {
+        await pool.query("ALTER TABLE chamber_client_assignments ADD COLUMN status VARCHAR(50) DEFAULT 'active'");
+        console.log('🌱 Added column status to chamber_client_assignments.');
+      }
+
+      if (!colNames.includes('updated_at')) {
+        await pool.query('ALTER TABLE chamber_client_assignments ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP');
+        console.log('🌱 Added column updated_at to chamber_client_assignments.');
+      }
+      // No default Amul/HyFun/etc. assignment seed — keep empty for live data only
     } catch (assErr) {
       console.warn('⚠️ Table chamber_client_assignments creation failed:', assErr.message);
     }
@@ -498,6 +518,21 @@ async function testDbConnection() {
         await pool.query("ALTER TABLE daily_chamber_temp_logs ADD COLUMN shift VARCHAR(50) DEFAULT 'Morning'");
         console.log('🌱 Added shift column to daily_chamber_temp_logs.');
       }
+      // Backfill empty shift from slot time / created hour
+      const [backfill] = await pool.query(`
+        UPDATE daily_chamber_temp_logs
+        SET shift = CASE
+          WHEN inspection_time LIKE '10:00%' OR inspection_time IN ('10:00 AM', '10:00') THEN 'Morning'
+          WHEN inspection_time LIKE '16:00%' OR inspection_time LIKE '18:00%'
+            OR inspection_time IN ('16:00', '18:00', '04:00 PM', '06:00 PM') THEN 'Evening'
+          WHEN HOUR(COALESCE(created_at, updated_at, NOW())) < 14 THEN 'Morning'
+          ELSE 'Evening'
+        END
+        WHERE shift IS NULL OR TRIM(shift) = '' OR LOWER(TRIM(shift)) NOT IN ('morning', 'evening')
+      `);
+      if (backfill?.affectedRows > 0) {
+        console.log(`🌱 Backfilled shift on ${backfill.affectedRows} chamber log(s).`);
+      }
     } catch (colErr) {
       console.warn('⚠️ Failed to migrate shift column:', colErr.message);
     }
@@ -522,6 +557,17 @@ async function testDbConnection() {
       }
     } catch (colErr) {
       console.warn('⚠️ Failed to rename chamber_temp column:', colErr.message);
+    }
+
+    // Auto migration: Add chamber_id to daily_chamber_temp_logs
+    try {
+      const [columns] = await pool.query("SHOW COLUMNS FROM daily_chamber_temp_logs LIKE 'chamber_id'");
+      if (columns.length === 0) {
+        await pool.query('ALTER TABLE daily_chamber_temp_logs ADD COLUMN chamber_id INT DEFAULT NULL');
+        console.log('🌱 Added chamber_id column to daily_chamber_temp_logs.');
+      }
+    } catch (colErr) {
+      console.warn('⚠️ Failed to migrate chamber_id column:', colErr.message);
     }
 
 

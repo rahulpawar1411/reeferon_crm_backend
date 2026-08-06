@@ -10,6 +10,10 @@ const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
 const { parsePagination, sendPaginated, appendWarehouseFilter } = require('../utils/pagination');
 const { logErrorCheckpoint } = require('../utils/errorHandler');
+const {
+  hasActivePermission,
+  consumeGrantedPermission
+} = require('./permissionController');
 
 let memoryChamberLogs = [];
 
@@ -124,7 +128,7 @@ exports.getChamberLogs = async (req, res) => {
     );
     const total = countRows[0]?.total ?? 0;
 
-    const query = `SELECT id, reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, box_temp AS chamber_temp, box_count, overdue_time, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email, chamber_type FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC LIMIT ? OFFSET ?`;
+    const query = `SELECT id, reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, box_temp AS chamber_temp, box_count, overdue_time, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email, chamber_type, shift, chamber_id, is_native, remarks FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC LIMIT ? OFFSET ?`;
 
     const [rows] = await db.query(query, [...params, limit, offset]);
     return sendPaginated(res, rows, total, page, limit);
@@ -204,10 +208,30 @@ exports.addChamberLog = async (req, res) => {
 
   try {
     const localTimestamp = formatDateTime(new Date());
+    const resolveShift = (shift, inspectionTime) => {
+      const s = String(shift || '').trim();
+      if (/^morning$/i.test(s)) return 'Morning';
+      if (/^evening$/i.test(s)) return 'Evening';
+      const t = String(inspectionTime || '').trim().toUpperCase();
+      if (t.startsWith('10:00') || t === '10:00 AM') return 'Morning';
+      if (t.startsWith('16:00') || t.startsWith('18:00') || t.includes('04:00 PM') || t.includes('06:00 PM')) {
+        return 'Evening';
+      }
+      const hm = t.match(/^(\d{1,2}):(\d{2})/);
+      if (hm) {
+        let h = parseInt(hm[1], 10);
+        if (t.includes('PM') && h < 12) h += 12;
+        if (t.includes('AM') && h === 12) h = 0;
+        return h < 14 ? 'Morning' : 'Evening';
+      }
+      return 'Morning';
+    };
+    const shiftVal = resolveShift(req.body.shift, inspection_time);
+
     const query = `
       INSERT INTO daily_chamber_temp_logs 
-      (entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, created_at, updated_at, warehouse_name, operator_email)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, created_at, updated_at, warehouse_name, operator_email, shift, chamber_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const values = [
       entry_date, 
@@ -222,7 +246,9 @@ exports.addChamberLog = async (req, res) => {
       localTimestamp,
       localTimestamp,
       req.user ? req.user.warehouse_name : null,
-      req.user ? req.user.email : null
+      req.user ? req.user.email : null,
+      shiftVal,
+      req.body.chamber_type || 'Frozen'
     ];
 
     const [result] = await db.query(query, values);
@@ -283,6 +309,17 @@ exports.updateChamberLog = async (req, res) => {
   }
 
   try {
+    // DO operators: edit requires an active (unused) Super Admin grant
+    if (req.user?.role === 'do_operator') {
+      const allowed = await hasActivePermission(req.user.email, 'Chamber', id, 'Edit');
+      if (!allowed) {
+        return res.status(403).json({
+          success: false,
+          message: 'Edit permission expired or not approved. Request Super Admin permission again.'
+        });
+      }
+    }
+
     const [existingRows] = await db.query('SELECT reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count, chamber_type FROM daily_chamber_temp_logs WHERE id = ?', [id]);
     
     let temp_sensor_image = req.body.temp_sensor_image;
@@ -335,6 +372,13 @@ exports.updateChamberLog = async (req, res) => {
         box_count: req.body.box_count !== undefined ? (req.body.box_count !== '' ? parseInt(req.body.box_count, 10) : null) : current.box_count
       };
 
+      if (updatedValues.box_count !== null && updatedValues.box_count !== undefined && updatedValues.box_count < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Box quantity cannot be negative. Enter 0 or a positive count.'
+        });
+      }
+
       const chamberFieldMapping = {
         entry_date: 'Date',
         client_name: 'Client Name',
@@ -359,6 +403,8 @@ exports.updateChamberLog = async (req, res) => {
         chamber_name = COALESCE(?, chamber_name), 
         inspection_time = COALESCE(?, inspection_time), 
         box_temp = COALESCE(?, box_temp), 
+        box_count = COALESCE(?, box_count),
+        chamber_type = COALESCE(?, chamber_type),
         monitor_supervisor_name = COALESCE(?, monitor_supervisor_name),
         temp_sensor_image = COALESCE(?, temp_sensor_image),
         photo_capture_time = ?,
@@ -375,6 +421,8 @@ exports.updateChamberLog = async (req, res) => {
       chamber_name || null,
       inspection_time || null,
       box_temp !== undefined ? (box_temp !== '' ? box_temp : null) : null,
+      req.body.box_count !== undefined && req.body.box_count !== '' ? parseInt(req.body.box_count, 10) : null,
+      req.body.chamber_type || null,
       monitor_supervisor_name || null,
       temp_sensor_image,
       photo_capture_time,
@@ -395,7 +443,22 @@ exports.updateChamberLog = async (req, res) => {
       `${await getActorLabel(req.user)} updated Chamber Temp record (Ref: ${refNo})${update_details ? `. Changes: ${update_details}` : ''}. Remarks: ${remarks}`
     );
 
-    return res.json({ message: 'Record updated successfully.', photo_capture_time, time_variance_minutes });
+    // One-time grant: DO must request permission again for the next edit
+    if (req.user?.role === 'do_operator') {
+      try {
+        await consumeGrantedPermission(req.user.email, 'Chamber', id, 'Edit');
+      } catch (consumeErr) {
+        console.warn('⚠️ Failed to consume edit permission after chamber update:', consumeErr.message);
+      }
+    }
+
+    return res.json({
+      message: 'Record updated successfully.',
+      photo_capture_time,
+      time_variance_minutes,
+      inspection_time: inspection_time || (existingRows[0] && existingRows[0].inspection_time) || null,
+      updated_at: localTimestamp
+    });
   } catch (err) {
     await logErrorCheckpoint(err, {
       checkpoint: 'updateChamberLog',

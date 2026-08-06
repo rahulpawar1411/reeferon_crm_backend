@@ -163,32 +163,15 @@ async function run() {
       }
     }
 
-    // 4. Seed initial default users if tables are empty
+    // 4. Seed Super Admin only if table is empty (never overwrite existing credentials)
     const salt = await bcrypt.genSalt(10);
-    
-    // Seed Super Admin
     const [superAdmins] = await db.query("SELECT * FROM super_admin");
     if (superAdmins.length === 0) {
       const hashedPass = await bcrypt.hash("admin123", salt);
       await db.query("INSERT INTO super_admin (email, password) VALUES (?, ?)", ["admin@reeferon.com", hashedPass]);
       console.log("🌱 Default Super Admin user seeded (admin@reeferon.com / admin123).");
     }
-
-    // Seed Sub Admin
-    const [subAdminsList] = await db.query("SELECT * FROM sub_admins WHERE email = ?", ["subadmin@reeferon.com"]);
-    if (subAdminsList.length === 0) {
-      const hashedPass = await bcrypt.hash("subadmin123", salt);
-      await db.query("INSERT INTO sub_admins (email, password, full_name) VALUES (?, ?, ?)", ["subadmin@reeferon.com", hashedPass, "Test Sub Admin"]);
-      console.log("🌱 Default Sub Admin user seeded (subadmin@reeferon.com / subadmin123).");
-    }
-
-    // Seed DO Operator
-    const [doOperators] = await db.query("SELECT * FROM do_operators WHERE email = ?", ["operator@reeferon.com"]);
-    if (doOperators.length === 0) {
-      const hashedPass = await bcrypt.hash("operator123", salt);
-      await db.query("INSERT INTO do_operators (email, password, full_name) VALUES (?, ?, ?)", ["operator@reeferon.com", hashedPass, "Test DO Operator"]);
-      console.log("🌱 Default DO Operator user seeded (operator@reeferon.com / operator123).");
-    }
+    // No default Sub-Admin / DO Operator seed — create those from Super Admin UI
     
     console.log("🎉 Database schema verification completed successfully!");
     process.exit(0);
