@@ -1,18 +1,24 @@
 // ====================================================================
-// Email service via Resend HTTPS API (backend/utils/emailService.js)
-// SMTP disabled — often blocked on Render free tier.
+// Email: Resend (HTTPS) + optional Gmail SMTP fallback
+// - Resend without verified domain: only to your Resend account email
+// - SMTP (local): can send to any recipient
 // ====================================================================
 
+const nodemailer = require('nodemailer');
+
 function getFromAddress() {
-  return (process.env.EMAIL_FROM || 'ReeferON <onboarding@resend.dev>').trim();
+  return (
+    process.env.EMAIL_FROM ||
+    (process.env.SMTP_USER
+      ? `ReeferON <${process.env.SMTP_USER.trim()}>`
+      : 'ReeferON <onboarding@resend.dev>')
+  ).trim();
 }
 
-/** Install / Expo Go invite link (set MOBILE_APP_URL in .env). */
 function getMobileAppUrl() {
   return (process.env.MOBILE_APP_URL || process.env.EXPO_GO_URL || '').trim();
 }
 
-/** Opens app if already installed (dev/production build). */
 function getMobileDeepLink() {
   return (process.env.MOBILE_DEEP_LINK || 'reeferon://login').trim();
 }
@@ -90,28 +96,28 @@ function buildCredentialsText({ fullName, email, password, roleLabel, includeMob
   return lines.join('\n');
 }
 
-/**
- * Send transactional email via Resend.
- * @returns {{ sent: boolean, skipped?: boolean, error?: string, id?: string }}
- */
-async function sendEmail({ to, subject, html, text }) {
-  const apiKey = (process.env.RESEND_API_KEY || '').trim();
-  const from = getFromAddress();
+function getSmtpConfig() {
+  const user = (process.env.SMTP_USER || '').trim();
+  const pass = (process.env.SMTP_PASS || '').replace(/\s+/g, '').trim();
+  const host = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+  const port = Number(process.env.SMTP_PORT || 465);
+  const secure = String(process.env.SMTP_SECURE || 'true').toLowerCase() !== 'false';
+  return { user, pass, host, port, secure };
+}
 
-  if (!apiKey) {
-    console.warn('⚠️ RESEND_API_KEY not set — credentials email skipped.');
-    return {
-      sent: false,
-      skipped: true,
-      error: 'RESEND_API_KEY is not configured. Add it to backend/.env (and Render env) then restart.'
-    };
-  }
+function isResendRecipientRestriction(msg) {
+  return /only send testing emails to your own email/i.test(String(msg || ''));
+}
+
+async function sendViaResend({ to, subject, html, text, from }) {
+  const apiKey = (process.env.RESEND_API_KEY || '').trim();
+  if (!apiKey) return null;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 12000);
 
   try {
-    console.log(`📧 Sending credentials email to ${to} via Resend from ${from}…`);
+    console.log(`📧 Sending via Resend to ${to} from ${from}…`);
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: {
@@ -131,19 +137,118 @@ async function sendEmail({ to, subject, html, text }) {
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
       const msg = body?.message || body?.error?.message || `Resend HTTP ${res.status}`;
-      console.error('❌ Resend email error:', msg);
-      return { sent: false, error: msg };
+      console.error('❌ Resend error:', msg);
+      return { sent: false, error: msg, provider: 'resend' };
     }
 
-    console.log(`📧 Email sent to ${to} (id: ${body.id || 'n/a'})`);
-    return { sent: true, id: body.id || null };
+    console.log(`📧 Resend OK to ${to} (id: ${body.id || 'n/a'})`);
+    return { sent: true, id: body.id || null, provider: 'resend' };
   } catch (err) {
     const msg = err.name === 'AbortError' ? 'Resend request timed out' : err.message;
-    console.error('❌ Resend email error:', msg);
-    return { sent: false, error: msg };
+    console.error('❌ Resend error:', msg);
+    return { sent: false, error: msg, provider: 'resend' };
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function sendViaSmtp({ to, subject, html, text, from }) {
+  const { user, pass, host, port, secure } = getSmtpConfig();
+  if (!user || !pass) {
+    return {
+      sent: false,
+      skipped: true,
+      error: 'SMTP_USER / SMTP_PASS not set.',
+      provider: 'smtp'
+    };
+  }
+
+  const transporter = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
+    connectionTimeout: 12000,
+    greetingTimeout: 12000,
+    socketTimeout: 15000
+  });
+
+  try {
+    // Use Gmail address as from when SMTP is used (must match authenticated user)
+    const smtpFrom = process.env.EMAIL_FROM_SMTP || `ReeferON <${user}>`;
+    console.log(`📧 Sending via SMTP to ${to} from ${smtpFrom}…`);
+    const info = await Promise.race([
+      transporter.sendMail({
+        from: smtpFrom,
+        to,
+        subject,
+        text: text || undefined,
+        html
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('SMTP timed out after 15s')), 15000)
+      )
+    ]);
+    console.log(`📧 SMTP OK to ${to} (id: ${info.messageId || 'n/a'})`);
+    return { sent: true, id: info.messageId || null, provider: 'smtp' };
+  } catch (err) {
+    console.error('❌ SMTP error:', err.message);
+    try {
+      transporter.close();
+    } catch (_) {}
+    return { sent: false, error: err.message, provider: 'smtp' };
+  }
+}
+
+/**
+ * Send credentials email.
+ * Prefer SMTP when configured (any recipient). Else Resend.
+ * If Resend fails due to "own email only", fall back to SMTP when available.
+ */
+async function sendEmail({ to, subject, html, text }) {
+  const from = getFromAddress();
+  const { user, pass } = getSmtpConfig();
+  const hasSmtp = !!(user && pass);
+  const hasResend = !!(process.env.RESEND_API_KEY || '').trim();
+
+  // Prefer SMTP for any-recipient delivery when available (typical local setup)
+  if (hasSmtp && String(process.env.EMAIL_PREFER_SMTP || 'true').toLowerCase() !== 'false') {
+    const smtpResult = await sendViaSmtp({ to, subject, html, text, from });
+    if (smtpResult.sent) return smtpResult;
+    // If SMTP failed and Resend exists, try Resend
+    if (hasResend) {
+      const resendResult = await sendViaResend({ to, subject, html, text, from });
+      if (resendResult) return resendResult;
+    }
+    return smtpResult;
+  }
+
+  if (hasResend) {
+    const resendResult = await sendViaResend({ to, subject, html, text, from });
+    if (resendResult?.sent) return resendResult;
+    // Testing-mode restriction → try SMTP if configured
+    if (hasSmtp && isResendRecipientRestriction(resendResult?.error)) {
+      console.warn('⚠️ Resend blocked other recipients — falling back to SMTP…');
+      return sendViaSmtp({ to, subject, html, text, from });
+    }
+    if (hasSmtp && resendResult && !resendResult.sent) {
+      return sendViaSmtp({ to, subject, html, text, from });
+    }
+    return (
+      resendResult || {
+        sent: false,
+        error:
+          'Resend failed. Without a verified domain you can only email your Resend account address. Verify a domain at resend.com/domains, or set SMTP_USER/SMTP_PASS for local sending.'
+      }
+    );
+  }
+
+  return {
+    sent: false,
+    skipped: true,
+    error:
+      'No email provider configured. Set SMTP_USER/SMTP_PASS (any recipient, local) or RESEND_API_KEY + verified domain (deploy).'
+  };
 }
 
 async function sendOperatorCredentialsEmail({ email, password, full_name }) {
