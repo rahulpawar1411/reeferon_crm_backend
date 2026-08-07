@@ -1,17 +1,10 @@
 // ====================================================================
-// Email service via Gmail SMTP + Nodemailer (backend/utils/emailService.js)
-// Used to send account credentials after DO / Sub-Admin creation.
+// Email service via Resend HTTPS API (backend/utils/emailService.js)
+// SMTP disabled — often blocked on Render free tier.
 // ====================================================================
 
-const nodemailer = require('nodemailer');
-
 function getFromAddress() {
-  return (
-    process.env.EMAIL_FROM ||
-    (process.env.SMTP_USER
-      ? `ReeferON <${process.env.SMTP_USER.trim()}>`
-      : 'ReeferON <noreply@localhost>')
-  ).trim();
+  return (process.env.EMAIL_FROM || 'ReeferON <onboarding@resend.dev>').trim();
 }
 
 /** Install / Expo Go invite link (set MOBILE_APP_URL in .env). */
@@ -97,65 +90,59 @@ function buildCredentialsText({ fullName, email, password, roleLabel, includeMob
   return lines.join('\n');
 }
 
-function getSmtpConfig() {
-  const user = (process.env.SMTP_USER || '').trim();
-  const pass = (process.env.SMTP_PASS || '').replace(/\s+/g, '').trim();
-  const host = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
-  const port = Number(process.env.SMTP_PORT || 465);
-  const secure = String(process.env.SMTP_SECURE || 'true').toLowerCase() !== 'false';
-
-  return { user, pass, host, port, secure };
-}
-
 /**
- * Send a transactional email via Gmail SMTP (Nodemailer).
+ * Send transactional email via Resend.
  * @returns {{ sent: boolean, skipped?: boolean, error?: string, id?: string }}
  */
 async function sendEmail({ to, subject, html, text }) {
-  const { user, pass, host, port, secure } = getSmtpConfig();
+  const apiKey = (process.env.RESEND_API_KEY || '').trim();
+  const from = getFromAddress();
 
-  if (!user || !pass) {
-    console.warn('⚠️ SMTP_USER / SMTP_PASS not set — credentials email skipped.');
+  if (!apiKey) {
+    console.warn('⚠️ RESEND_API_KEY not set — credentials email skipped.');
     return {
       sent: false,
       skipped: true,
-      error: 'SMTP is not configured. Add SMTP_USER and SMTP_PASS (Gmail App Password) to backend/.env and restart the server.'
+      error: 'RESEND_API_KEY is not configured. Add it to backend/.env (and Render env) then restart.'
     };
   }
 
-  const from = getFromAddress();
-  const transporter = nodemailer.createTransport({
-    host,
-    port,
-    secure,
-    auth: { user, pass },
-    connectionTimeout: 12000,
-    greetingTimeout: 12000,
-    socketTimeout: 15000
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
 
   try {
-    console.log(`📧 Sending credentials email to ${to} via SMTP ${host}:${port} from ${from}…`);
-    const info = await Promise.race([
-      transporter.sendMail({
+    console.log(`📧 Sending credentials email to ${to} via Resend from ${from}…`);
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
         from,
-        to,
+        to: [to],
         subject,
-        text: text || undefined,
-        html
+        html,
+        text: text || undefined
       }),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Email send timed out after 15s')), 15000)
-      )
-    ]);
-    console.log(`📧 Email sent to ${to} (id: ${info.messageId || 'n/a'})`);
-    return { sent: true, id: info.messageId || null };
+      signal: controller.signal
+    });
+
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = body?.message || body?.error?.message || `Resend HTTP ${res.status}`;
+      console.error('❌ Resend email error:', msg);
+      return { sent: false, error: msg };
+    }
+
+    console.log(`📧 Email sent to ${to} (id: ${body.id || 'n/a'})`);
+    return { sent: true, id: body.id || null };
   } catch (err) {
-    console.error('❌ SMTP email error:', err.message);
-    try {
-      transporter.close();
-    } catch (_) {}
-    return { sent: false, error: err.message };
+    const msg = err.name === 'AbortError' ? 'Resend request timed out' : err.message;
+    console.error('❌ Resend email error:', msg);
+    return { sent: false, error: msg };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
