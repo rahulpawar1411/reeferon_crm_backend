@@ -21,13 +21,21 @@ router.get('/check', verifyToken, permissionController.checkPermission);
 // 4. Get permission requests (All for Super Admin, User-specific for Operator)
 router.get('/', verifyToken, permissionController.getPermissionRequests);
 
-// 5. Request edit permission (DO Operator)
+// 5. Structured Super Allow / request history for a specific log record
+router.get(
+  '/record-history',
+  verifyToken,
+  requireRole(['super_admin', 'sub_admin']),
+  permissionController.getRecordPermissionHistory
+);
+
+// 6. Request edit permission (DO Operator)
 router.post('/', verifyToken, permissionController.createPermissionRequest);
 
-// 6. Approve or deny permission request (Super Admin only)
+// 7. Approve or deny permission request (Super Admin only)
 router.put('/:id', verifyToken, requireRole(['super_admin']), permissionController.updatePermissionRequestStatus);
 
-// 7. DO marks notification as handled (Completed section)
+// 8. DO marks notification as handled (Completed section)
 router.patch(
   '/:id/complete',
   verifyToken,

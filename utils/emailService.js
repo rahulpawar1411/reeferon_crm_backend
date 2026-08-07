@@ -31,7 +31,7 @@ function escapeHtml(value) {
     .replace(/"/g, '&quot;');
 }
 
-function buildCredentialsHtml({ fullName, email, password, roleLabel, includeMobile }) {
+function buildCredentialsHtml({ fullName, email, password, roleLabel, includeMobile, warehouseName, chamberLimit }) {
   const appUrl = getMobileAppUrl();
   const deepLink = getMobileDeepLink();
 
@@ -53,6 +53,13 @@ function buildCredentialsHtml({ fullName, email, password, roleLabel, includeMob
     }
   }
 
+  let accessBlock = '';
+  if (warehouseName) {
+    accessBlock = `<p>Warehouse / Data Access: ${escapeHtml(warehouseName)} logs only` +
+      (chamberLimit ? `<br/>Chambers assigned: 1 to ${escapeHtml(String(chamberLimit))}` : '') +
+      `</p>`;
+  }
+
   return `
   <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222;line-height:1.5;">
     <p>Dear ${escapeHtml(fullName || 'User')},</p>
@@ -61,13 +68,14 @@ function buildCredentialsHtml({ fullName, email, password, roleLabel, includeMob
       Email: ${escapeHtml(email)}<br/>
       Password: ${escapeHtml(password)}
     </p>
+    ${accessBlock}
     ${appBlock}
     <p>Please keep your password confidential.</p>
     <p>Regards,<br/>ReeferON Team</p>
   </div>`;
 }
 
-function buildCredentialsText({ fullName, email, password, roleLabel, includeMobile }) {
+function buildCredentialsText({ fullName, email, password, roleLabel, includeMobile, warehouseName, chamberLimit }) {
   const lines = [
     `Dear ${fullName || 'User'},`,
     '',
@@ -77,6 +85,11 @@ function buildCredentialsText({ fullName, email, password, roleLabel, includeMob
     `Password: ${password}`,
     ''
   ];
+  if (warehouseName) {
+    lines.push(`Warehouse / Data Access: ${warehouseName} logs only`);
+    if (chamberLimit) lines.push(`Chambers assigned: 1 to ${chamberLimit}`);
+    lines.push('');
+  }
 
   if (includeMobile) {
     const appUrl = getMobileAppUrl();
@@ -251,13 +264,21 @@ async function sendEmail({ to, subject, html, text }) {
   };
 }
 
-async function sendOperatorCredentialsEmail({ email, password, full_name }) {
+async function sendOperatorCredentialsEmail({
+  email,
+  password,
+  full_name,
+  warehouse_name,
+  chamber_limit
+}) {
   const payload = {
     roleLabel: 'Data Operator',
     fullName: full_name,
     email,
     password,
-    includeMobile: true
+    includeMobile: true,
+    warehouseName: warehouse_name || '',
+    chamberLimit: chamber_limit || null
   };
 
   return sendEmail({

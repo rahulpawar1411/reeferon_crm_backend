@@ -32,16 +32,31 @@ exports.getActivityLogs = async (req, res) => {
         OR (a.description IS NOT NULL AND a.description LIKE '%[CHECKPOINT]%')
       )`);
     } else if (cat === 'do_changes') {
-      // DO client/chamber add-delete ops (mobile report + assignment sync)
+      // DO client/chamber add-delete ops + permission allow/deny decisions
       conditions.push(`(
-        a.action IN ('ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT', 'ADD_CHAMBER', 'DELETE_CHAMBER')
+        a.action IN (
+          'ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT',
+          'ADD_CHAMBER', 'DELETE_CHAMBER',
+          'REQUEST_EDIT', 'REQUEST_DELETE',
+          'GRANT_PERMISSION', 'GRANT_DELETE',
+          'DENY_PERMISSION', 'DENY_DELETE',
+          'USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION'
+        )
+        OR a.log_type IN ('DO_CHANGE', 'ChamberMaster', 'ClientMaster', 'MasterSetup')
         OR (a.log_type = 'Chamber Client Assignment' AND a.action IN ('CREATE', 'DELETE', 'ADD_CLIENT', 'DELETE_CLIENT'))
       )`);
     } else {
-      // Operator activity trail (exclude security / system / error rows AND exclude do_changes to keep general activity clean)
+      // Operator activity trail (exclude security / system / error / DO master & permission rows)
       conditions.push(`(
-        (a.log_type IS NULL OR a.log_type NOT IN ('PERMISSION', 'SECURITY', 'ERROR', 'SYSTEM'))
-        AND (a.action IS NULL OR a.action NOT IN ('SYSTEM_ERROR', 'ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT', 'ADD_CHAMBER', 'DELETE_CHAMBER'))
+        (a.log_type IS NULL OR a.log_type NOT IN ('PERMISSION', 'SECURITY', 'ERROR', 'SYSTEM', 'DO_CHANGE', 'ChamberMaster', 'ClientMaster', 'MasterSetup'))
+        AND (a.action IS NULL OR a.action NOT IN (
+          'SYSTEM_ERROR',
+          'ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT', 'ADD_CHAMBER', 'DELETE_CHAMBER',
+          'REQUEST_EDIT', 'REQUEST_DELETE',
+          'GRANT_PERMISSION', 'GRANT_DELETE',
+          'DENY_PERMISSION', 'DENY_DELETE',
+          'USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION'
+        ))
         AND NOT (a.log_type = 'Chamber Client Assignment' AND a.action IN ('CREATE', 'DELETE'))
       )`);
     }
@@ -102,6 +117,7 @@ exports.getActivityLogs = async (req, res) => {
         a.action,
         a.log_type,
         a.description,
+        a.remark,
         a.permission_req,
         a.created_at
       ${fromJoin}
@@ -123,19 +139,56 @@ exports.getActivityLogs = async (req, res) => {
 
 exports.createActivityLog = async (req, res) => {
   try {
-    const { action, description } = req.body;
-    const log_type = req.body.log_type || req.body.logType || 'activity';
+    const { action, description, remark, record_id, permission_req } = req.body;
+    let log_type = req.body.log_type || req.body.logType || 'activity';
     if (!action || !description) {
       return res.status(400).json({ success: false, message: 'Action and Description are required.' });
     }
     const email = req.user ? req.user.email : 'system';
-    
-    await db.query(
-      'INSERT INTO do_operator_activities (operator_email, action, log_type, description) VALUES (?, ?, ?, ?)',
-      [email, action, log_type, description]
-    );
 
-    return res.status(201).json({ success: true, message: 'Activity log recorded successfully.' });
+    const masterActions = [
+      'ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT',
+      'ADD_CHAMBER', 'DELETE_CHAMBER',
+      'REQUEST_EDIT', 'REQUEST_DELETE'
+    ];
+    if (masterActions.includes(String(action)) && (!log_type || log_type === 'activity')) {
+      log_type = 'DO_CHANGE';
+    }
+
+    const { extractRemark } = require('../utils/logger');
+    const resolvedRemark =
+      (remark != null && String(remark).trim()) ||
+      extractRemark(description) ||
+      null;
+
+    const permId =
+      permission_req != null
+        ? permission_req
+        : record_id != null
+          ? record_id
+          : null;
+
+    try {
+      await db.query(
+        'INSERT INTO do_operator_activities (operator_email, action, log_type, description, permission_req, remark) VALUES (?, ?, ?, ?, ?, ?)',
+        [email, action, log_type, description, permId, resolvedRemark]
+      );
+    } catch (colErr) {
+      if (/Unknown column 'remark'/i.test(String(colErr.message || ''))) {
+        await db.query(
+          'INSERT INTO do_operator_activities (operator_email, action, log_type, description, permission_req) VALUES (?, ?, ?, ?, ?)',
+          [email, action, log_type, description, permId]
+        );
+      } else {
+        throw colErr;
+      }
+    }
+
+    return res.status(201).json({
+      success: true,
+      message: 'Activity log recorded successfully.',
+      remark: resolvedRemark
+    });
   } catch (error) {
     console.error('Failed to create activity log:', error);
     return res.status(500).json({ success: false, message: 'Failed to record activity log.', error: error.message });

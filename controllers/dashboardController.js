@@ -132,7 +132,9 @@ exports.getAccessScopeOptions = async (req, res) => {
       `SELECT DISTINCT warehouse_name AS name FROM daily_chamber_temp_logs WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`,
       `SELECT DISTINCT warehouse_name AS name FROM inward_temp_logs WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`,
       `SELECT DISTINCT warehouse_name AS name FROM outward_temp_logs WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`,
-      `SELECT DISTINCT warehouse_name AS name FROM daily_temp_logs WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`
+      `SELECT DISTINCT warehouse_name AS name FROM daily_temp_logs WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`,
+      `SELECT DISTINCT warehouse_name AS name FROM do_operators WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`,
+      `SELECT DISTINCT warehouse_name AS name FROM chamber_client_assignments WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''`
     ];
 
     for (const sql of warehouseQueries) {

@@ -391,6 +391,11 @@ exports.updateChamberLog = async (req, res) => {
       };
 
       update_details = buildDiffString(current, updatedValues, chamberFieldMapping);
+      const prevDetails = String(current.update_details || '').trim();
+      if (prevDetails && update_details) {
+        update_details = `${prevDetails} | ${update_details}`;
+        if (update_details.length > 60000) update_details = update_details.slice(-60000);
+      }
       update_count = (parseInt(current.update_count, 10) || 0) + 1;
     }
 
@@ -440,7 +445,9 @@ exports.updateChamberLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'UPDATE',
       'Chamber Temp Log',
-      `${await getActorLabel(req.user)} updated Chamber Temp record (Ref: ${refNo})${update_details ? `. Changes: ${update_details}` : ''}. Remarks: ${remarks}`
+      `${await getActorLabel(req.user)} updated Chamber Temp record (Ref: ${refNo})${update_details ? `. Changes: ${update_details}` : ''}. Remarks: ${remarks}`,
+      id,
+      remarks || null
     );
 
     // One-time grant: DO must request permission again for the next edit
@@ -519,7 +526,9 @@ exports.deleteChamberLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'DELETE',
       'Chamber Temp Log',
-      `${await getActorLabel(req.user)} deleted Chamber Temp record (Ref: ${refNo}) — chamber ${chamberName}, client ${clientName}. Remarks: ${remarks}`
+      `${await getActorLabel(req.user)} deleted Chamber Temp record (Ref: ${refNo}) — chamber ${chamberName}, client ${clientName}. Remarks: ${remarks}`,
+      id,
+      remarks || null
     );
 
     return res.json({ message: 'Record deleted successfully.' });

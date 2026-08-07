@@ -8,6 +8,39 @@ const bcrypt = require('bcryptjs');
 const { logActivity } = require('../utils/logger');
 const { handleControllerError } = require('../utils/errorHandler');
 const { sendOperatorCredentialsEmail } = require('../utils/emailService');
+const { ensureNumberedChambers } = require('./chamberController');
+
+/**
+ * Keep past + future DO data access aligned with profile warehouse.
+ * Updates all logs tagged to this operator email.
+ */
+async function syncOperatorWarehouseOnPastLogs(operatorEmail, warehouseName) {
+  const email = String(operatorEmail || '').trim();
+  const warehouse = String(warehouseName || '').trim();
+  if (!email || !warehouse) return { updated: 0 };
+
+  const tables = [
+    'daily_chamber_temp_logs',
+    'inward_temp_logs',
+    'outward_temp_logs'
+  ];
+  let updated = 0;
+  for (const table of tables) {
+    try {
+      const [result] = await db.query(
+        `UPDATE ${table}
+         SET warehouse_name = ?
+         WHERE LOWER(TRIM(operator_email)) = LOWER(?)
+           AND (warehouse_name IS NULL OR TRIM(warehouse_name) = '' OR warehouse_name <> ?)`,
+        [warehouse, email, warehouse]
+      );
+      updated += Number(result?.affectedRows || 0);
+    } catch (err) {
+      console.warn(`Warehouse sync skipped for ${table}:`, err.message);
+    }
+  }
+  return { updated };
+}
 
 // 1. GET ALL OPERATORS
 exports.getOperators = async (req, res) => {
@@ -30,14 +63,16 @@ exports.createOperator = async (req, res) => {
   try {
     const { email, password, full_name, phone_no, warehouse_name, chamber_limit } = req.body;
     if (!email || !password || !full_name || !phone_no || !warehouse_name) {
-      return res.status(400).json({ error: 'All fields (Email, Password, Full Name, Phone No., Warehouse Name) are required.' });
+      return res.status(400).json({ error: 'All fields (Email, Password, Full Name, Phone No., Warehouse / Data Access) are required.' });
     }
     const limitVal = chamber_limit ? parseInt(chamber_limit, 10) : 4;
+    const warehouseTrim = String(warehouse_name).trim();
+    const emailTrim = String(email).trim().toLowerCase();
 
     // Check if operator already exists
     const [existing] = await db.query(
       'SELECT id FROM do_operators WHERE email = ? LIMIT 1',
-      [email]
+      [emailTrim]
     );
     if (existing.length > 0) {
       return res.status(400).json({ error: 'Operator email already exists.' });
@@ -49,24 +84,30 @@ exports.createOperator = async (req, res) => {
 
     await db.query(
       'INSERT INTO do_operators (email, password, full_name, phone_no, warehouse_name, chamber_limit) VALUES (?, ?, ?, ?, ?, ?)',
-      [email, hashed, full_name, phone_no, warehouse_name, limitVal]
+      [emailTrim, hashed, full_name, phone_no, warehouseTrim, limitVal]
     );
+
+    // Pre-create Chamber 1 .. N so DO sees assigned chambers immediately
+    try {
+      await ensureNumberedChambers(limitVal);
+    } catch (_) {}
 
     // Log the permission change
     await logActivity(
       req.user?.email || 'super_admin',
       'CREATE',
       'PERMISSION',
-      `Registered operator profile: ${email} (Warehouse: ${warehouse_name})`
+      `Registered operator profile: ${emailTrim} (Warehouse / Data Access: ${warehouseTrim}, Chambers: 1-${limitVal})`
     );
 
     // Await email (Resend HTTPS is fast; SMTP has 12s timeout — stays under Render ~30s limit)
     const emailResult = await sendOperatorCredentialsEmail({
-      email: String(email).trim().toLowerCase(),
+      email: emailTrim,
       password,
       full_name,
       phone_no,
-      warehouse_name
+      warehouse_name: warehouseTrim,
+      chamber_limit: limitVal
     });
 
     await logActivity(
@@ -102,14 +143,26 @@ exports.updateOperator = async (req, res) => {
     const { email, password, full_name, phone_no, warehouse_name, chamber_limit } = req.body;
 
     if (!email || !full_name || !phone_no || !warehouse_name) {
-      return res.status(400).json({ error: 'All fields (Email, Full Name, Phone No., Warehouse Name) are required.' });
+      return res.status(400).json({ error: 'All fields (Email, Full Name, Phone No., Warehouse / Data Access) are required.' });
     }
     const limitVal = chamber_limit ? parseInt(chamber_limit, 10) : 4;
+    const warehouseTrim = String(warehouse_name).trim();
+    const emailTrim = String(email).trim().toLowerCase();
+
+    const [beforeRows] = await db.query(
+      'SELECT email, warehouse_name FROM do_operators WHERE id = ? LIMIT 1',
+      [id]
+    );
+    if (beforeRows.length === 0) {
+      return res.status(404).json({ error: 'Operator not found.' });
+    }
+    const prevEmail = beforeRows[0].email;
+    const prevWarehouse = beforeRows[0].warehouse_name || '';
 
     // Check if email belongs to another operator
     const [existing] = await db.query(
       'SELECT id FROM do_operators WHERE email = ? AND id != ? LIMIT 1',
-      [email, id]
+      [emailTrim, id]
     );
     if (existing.length > 0) {
       return res.status(400).json({ error: 'Email is already taken by another operator.' });
@@ -121,13 +174,43 @@ exports.updateOperator = async (req, res) => {
       const hashed = await bcrypt.hash(password, salt);
       await db.query(
         'UPDATE do_operators SET email = ?, password = ?, full_name = ?, phone_no = ?, warehouse_name = ?, chamber_limit = ? WHERE id = ?',
-        [email, hashed, full_name, phone_no, warehouse_name, limitVal, id]
+        [emailTrim, hashed, full_name, phone_no, warehouseTrim, limitVal, id]
       );
     } else {
       await db.query(
         'UPDATE do_operators SET email = ?, full_name = ?, phone_no = ?, warehouse_name = ?, chamber_limit = ? WHERE id = ?',
-        [email, full_name, phone_no, warehouse_name, limitVal, id]
+        [emailTrim, full_name, phone_no, warehouseTrim, limitVal, id]
       );
+    }
+
+    // Ensure Chamber 1 .. N exist for updated chamber_limit
+    try {
+      await ensureNumberedChambers(limitVal);
+    } catch (_) {}
+
+    // Past logs: keep Warehouse / Data Access in sync for this operator (old + new email)
+    const syncEmails = Array.from(
+      new Set([String(prevEmail || '').trim(), emailTrim].filter(Boolean))
+    );
+    let pastLogsUpdated = 0;
+    for (const syncEmail of syncEmails) {
+      const syncResult = await syncOperatorWarehouseOnPastLogs(syncEmail, warehouseTrim);
+      pastLogsUpdated += Number(syncResult.updated || 0);
+    }
+
+    // If email changed, retag past logs to the new email so Data Access filters stay correct
+    if (prevEmail && String(prevEmail).trim().toLowerCase() !== emailTrim) {
+      const logTables = ['daily_chamber_temp_logs', 'inward_temp_logs', 'outward_temp_logs'];
+      for (const table of logTables) {
+        try {
+          await db.query(
+            `UPDATE ${table} SET operator_email = ? WHERE LOWER(TRIM(operator_email)) = LOWER(?)`,
+            [emailTrim, prevEmail]
+          );
+        } catch (err) {
+          console.warn(`Email retag skipped for ${table}:`, err.message);
+        }
+      }
     }
 
     // Log the permission change
@@ -135,10 +218,19 @@ exports.updateOperator = async (req, res) => {
       req.user?.email || 'super_admin',
       'UPDATE',
       'PERMISSION',
-      `Updated operator profile: ${email} (Warehouse: ${warehouse_name})`
+      `Updated operator profile: ${emailTrim} (Warehouse / Data Access: ${warehouseTrim}` +
+        (prevWarehouse && prevWarehouse !== warehouseTrim ? ` ← was "${prevWarehouse}"` : '') +
+        `, Chambers: 1-${limitVal}` +
+        (pastLogsUpdated ? `, past logs synced: ${pastLogsUpdated}` : '') +
+        `)`
     );
 
-    return res.json({ message: 'Data operator updated successfully.' });
+    return res.json({
+      message: 'Data operator updated successfully.',
+      warehouse_name: warehouseTrim,
+      chamber_limit: limitVal,
+      past_logs_synced: pastLogsUpdated
+    });
   } catch (err) {
     return handleControllerError(res, err, {
       checkpoint: 'updateOperator',

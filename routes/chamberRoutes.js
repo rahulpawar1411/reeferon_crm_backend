@@ -27,9 +27,12 @@ const upload = multer({ storage });
 
 // Define Chamber and Client assignment routes
 router.get('/', controller.getChambers);
+router.post('/', controller.createChamber);
 router.get('/assignments', controller.getAssignments);
 router.post('/assignments', controller.addAssignment);
 router.delete('/assignments', controller.deleteAssignment);
+router.put('/:id', controller.updateChamber);
+router.delete('/:id', controller.deleteChamber);
 router.post('/inspections', upload.single('sensor_photo'), controller.addInspection);
 router.get('/inspections', controller.getInspections);
 router.delete('/inspections/:id', controller.deleteInspection);

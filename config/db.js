@@ -235,6 +235,7 @@ async function testDbConnection() {
           action VARCHAR(50) NOT NULL,
           log_type VARCHAR(50) NOT NULL,
           description TEXT DEFAULT NULL,
+          remark TEXT DEFAULT NULL,
           permission_req INT DEFAULT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -252,6 +253,12 @@ async function testDbConnection() {
           'ALTER TABLE do_operator_activities ADD COLUMN do_action_completed_at TIMESTAMP NULL DEFAULT NULL'
         );
         console.log('🌱 Added column do_action_completed_at to do_operator_activities.');
+      }
+      if (!colNames.includes('remark')) {
+        await pool.query(
+          'ALTER TABLE do_operator_activities ADD COLUMN remark TEXT DEFAULT NULL'
+        );
+        console.log('🌱 Added column remark to do_operator_activities.');
       }
 
       // Clean up deprecated do_permission_requests table if it exists
@@ -387,6 +394,19 @@ async function testDbConnection() {
         )
       `);
       console.log('🌱 Verified chambers table is online.');
+      // total_clients: how many client lots must be logged to complete a chamber task
+      try {
+        const [chCols] = await pool.query('SHOW COLUMNS FROM chambers');
+        const chColNames = chCols.map((c) => c.Field);
+        if (!chColNames.includes('total_clients')) {
+          await pool.query(
+            'ALTER TABLE chambers ADD COLUMN total_clients INT NULL DEFAULT NULL AFTER name'
+          );
+          console.log('🌱 Added column total_clients to chambers.');
+        }
+      } catch (colErr) {
+        console.warn('⚠️ chambers.total_clients migration skipped:', colErr.message);
+      }
       // No default chamber seed — keep empty until Super Admin / DO adds real data
     } catch (chErr) {
       console.warn('⚠️ Table chambers creation failed:', chErr.message);

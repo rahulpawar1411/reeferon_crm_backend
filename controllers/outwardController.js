@@ -626,7 +626,9 @@ exports.updateOutwardLog = async (req, res) => {
       req.user ? req.user.email : 'unknown',
       'UPDATE',
       'Outward Log',
-      `${await getActorLabel(req.user)} updated Outward record (Ref: ${refNo}) — vehicle ${vehicleNo}${update_details ? `. Changes: ${update_details}` : ''}`
+      `${await getActorLabel(req.user)} updated Outward record (Ref: ${refNo}) — vehicle ${vehicleNo}${update_details ? `. Changes: ${update_details}` : ''}`,
+      id,
+      null
     );
 
     return res.json({ message: 'Outward temperature record updated successfully.', update_count });

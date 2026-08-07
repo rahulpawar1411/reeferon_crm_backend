@@ -4,6 +4,67 @@ const exifr = require('exifr');
 const fs = require('fs');
 const { logActivity, getActorLabel } = require('../utils/logger');
 
+/**
+ * Ensure global master has Chamber 1 .. Chamber N (shared numbered list).
+ * Used when Super Admin assigns chamber_limit to a DO.
+ */
+async function ensureNumberedChambers(limit) {
+  const n = Math.max(1, Math.min(parseInt(limit, 10) || 4, 50));
+  for (let i = 1; i <= n; i++) {
+    const name = `Chamber ${i}`;
+    const [existing] = await db.query('SELECT id FROM chambers WHERE name = ? LIMIT 1', [name]);
+    if (existing.length === 0) {
+      await db.query('INSERT INTO chambers (name) VALUES (?)', [name]);
+    }
+  }
+  return n;
+}
+
+exports.ensureNumberedChambers = ensureNumberedChambers;
+
+function chamberNumberFromName(name) {
+  const m = String(name || '').match(/^Chamber\s+(\d+)$/i);
+  if (m) return parseInt(m[1], 10);
+  const any = String(name || '').match(/(\d+)/);
+  return any ? parseInt(any[1], 10) : null;
+}
+
+/** DO chamber list: numbered Chamber 1..limit first, then custom names, max `limit`. */
+function pickDoChambers(allRows, limit) {
+  const byNum = new Map();
+  const custom = [];
+  (allRows || []).forEach((r) => {
+    const num = chamberNumberFromName(r.name);
+    if (num != null && num >= 1 && num <= limit) {
+      if (!byNum.has(num)) byNum.set(num, r);
+    } else if (num == null) {
+      custom.push(r);
+    }
+  });
+  const result = [];
+  for (let i = 1; i <= limit; i++) {
+    if (byNum.has(i)) result.push(byNum.get(i));
+  }
+  for (const c of custom) {
+    if (result.length >= limit) break;
+    result.push(c);
+  }
+  return result;
+}
+exports.pickDoChambers = pickDoChambers;
+
+/** Stable INT for ChamberMaster ADD permission (by proposed name). */
+function chamberAddPermissionId(name) {
+  const s = `add|${String(name || '').trim().toLowerCase()}`;
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) % 2000000000 || 1;
+}
+exports.chamberAddPermissionId = chamberAddPermissionId;
+
 // Helper to format Date into standard YYYY-MM-DD HH:mm:ss string
 function formatDateTime(date) {
   if (!date || isNaN(date.getTime())) return null;
@@ -81,10 +142,9 @@ function calculateVariance(entryDateStr, inspectionTimeStr, captureDate) {
 // 1. Fetch all chambers
 exports.getChambers = async (req, res) => {
   try {
-    const [rows] = await db.query('SELECT id, name FROM chambers ORDER BY name ASC');
-    
-    // Filter chambers for Data Operators based on their assigned chamber limit
-    let filteredRows = rows;
+    // DO: ensure Chamber 1..chamber_limit exist, then return exactly those
+    let filteredRows;
+    let appliedLimit = null;
     if (req.user && req.user.role === 'do_operator') {
       let limit = 4;
       try {
@@ -95,17 +155,28 @@ exports.getChambers = async (req, res) => {
       } catch (dbErr) {
         limit = parseInt(req.user.chamber_limit || 4, 10);
       }
+      if (!Number.isFinite(limit) || limit < 1) limit = 4;
+      appliedLimit = limit;
 
-      filteredRows = rows.filter(row => {
-        const numMatch = row.name.match(/\d+/);
-        const chamberNum = numMatch ? parseInt(numMatch[0], 10) : null;
-        return chamberNum === null || chamberNum <= limit;
-      });
+      // Only bootstrap Chamber 1..N when none exist yet (so DO delete can stick)
+      const [existingAll] = await db.query('SELECT id, name, total_clients FROM chambers ORDER BY id ASC');
+      const picked = pickDoChambers(existingAll, limit);
+      if (picked.length === 0) {
+        await ensureNumberedChambers(limit);
+        const [rows] = await db.query('SELECT id, name, total_clients FROM chambers ORDER BY id ASC');
+        filteredRows = pickDoChambers(rows, limit);
+      } else {
+        filteredRows = picked;
+      }
+    } else {
+      const [rows] = await db.query('SELECT id, name, total_clients FROM chambers ORDER BY name ASC');
+      filteredRows = rows;
     }
 
     return res.status(200).json({
       success: true,
-      data: filteredRows
+      data: filteredRows,
+      chamber_limit: appliedLimit
     });
   } catch (error) {
     console.error('Error fetching chambers:', error);
@@ -144,8 +215,7 @@ exports.getAssignments = async (req, res) => {
       }
 
       filteredRows = rows.filter(row => {
-        const numMatch = row.chamber_name.match(/\d+/);
-        const chamberNum = numMatch ? parseInt(numMatch[0], 10) : null;
+        const chamberNum = chamberNumberFromName(row.chamber_name);
         return chamberNum === null || chamberNum <= limit;
       });
     }
@@ -523,6 +593,317 @@ exports.deleteAssignment = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to delete assignment.',
+      error: error.message
+    });
+  }
+};
+
+// 7. Create a chamber (DO within chamber_limit, or Super Admin)
+exports.createChamber = async (req, res) => {
+  try {
+    let { name, remark } = req.body;
+    name = (name || '').trim();
+    remark = (remark || '').trim();
+
+    if (req.user && req.user.role === 'do_operator') {
+      let limit = 4;
+      try {
+        const [userRows] = await db.query(
+          'SELECT chamber_limit FROM do_operators WHERE email = ? LIMIT 1',
+          [req.user.email]
+        );
+        if (userRows.length > 0) limit = parseInt(userRows[0].chamber_limit || 4, 10);
+      } catch (_) {
+        limit = parseInt(req.user.chamber_limit || 4, 10);
+      }
+      if (!Number.isFinite(limit) || limit < 1) limit = 4;
+
+      if (!name) {
+        return res.status(400).json({
+          success: false,
+          message: 'Chamber name is required.'
+        });
+      }
+
+      // Super Admin must have allowed this chamber add (ChamberMaster Edit by name hash)
+      const { hasActivePermission, consumeGrantedPermission } = require('./permissionController');
+      const permId = chamberAddPermissionId(name);
+      const allowed = await hasActivePermission(req.user.email, 'ChamberMaster', permId, 'Edit');
+      if (!allowed) {
+        return res.status(403).json({
+          success: false,
+          message: 'Super Admin allow required to add this chamber. Request permission from the app first.'
+        });
+      }
+
+      let [existing] = await db.query('SELECT id, name, total_clients FROM chambers ORDER BY id ASC');
+      const existingByName = existing.find(
+        (c) => String(c.name || '').toLowerCase() === name.toLowerCase()
+      );
+
+      const ensureIncluded = async (chamberId) => {
+        let picked = pickDoChambers(existing, limit);
+        if (picked.some((c) => Number(c.id) === Number(chamberId))) return limit;
+        let newLimit = Math.min(50, limit + 1);
+        while (
+          newLimit <= 50 &&
+          !pickDoChambers(existing, newLimit).some((c) => Number(c.id) === Number(chamberId))
+        ) {
+          newLimit += 1;
+        }
+        await db.query(
+          'UPDATE do_operators SET chamber_limit = ? WHERE email = ?',
+          [newLimit, req.user.email]
+        );
+        limit = newLimit;
+        return limit;
+      };
+
+      if (existingByName) {
+        await ensureIncluded(existingByName.id);
+        try {
+          await consumeGrantedPermission(req.user.email, 'ChamberMaster', permId, 'Edit');
+        } catch (_) {}
+        return res.status(200).json({
+          success: true,
+          message: 'Chamber already assigned.',
+          data: {
+            id: existingByName.id,
+            name: existingByName.name,
+            total_clients: existingByName.total_clients ?? null
+          },
+          chamber_limit: limit
+        });
+      }
+
+      // New name — bump limit first so pickDoChambers can include custom after insert
+      const current = pickDoChambers(existing, limit);
+      if (current.length >= limit) {
+        const newLimit = current.length + 1;
+        try {
+          await db.query(
+            'UPDATE do_operators SET chamber_limit = ? WHERE email = ?',
+            [newLimit, req.user.email]
+          );
+          limit = newLimit;
+        } catch (_) {}
+      }
+
+      const [result] = await db.query('INSERT INTO chambers (name) VALUES (?)', [name]);
+      existing = [...existing, { id: result.insertId, name, total_clients: null }];
+      await ensureIncluded(result.insertId);
+
+      try {
+        await consumeGrantedPermission(req.user.email, 'ChamberMaster', permId, 'Edit');
+      } catch (_) {}
+
+      try {
+        const email = req.user ? req.user.email : 'system';
+        const actorLabel = req.user ? (req.user.full_name || email) : 'System';
+        await logActivity(
+          email,
+          'ADD_CHAMBER',
+          'Chamber Master',
+          `${actorLabel} created chamber "${name}" (id: ${result.insertId})${remark ? `. Remark: ${remark}` : ''}.`
+        );
+      } catch (_) {}
+
+      return res.status(201).json({
+        success: true,
+        message: 'Chamber created successfully.',
+        data: { id: result.insertId, name, total_clients: null },
+        chamber_limit: limit
+      });
+    }
+
+    const [existing] = await db.query('SELECT id, name FROM chambers ORDER BY id ASC');
+    if (!name) {
+      name = `Chamber ${existing.length + 1}`;
+    }
+
+    const [dup] = await db.query('SELECT id FROM chambers WHERE name = ? LIMIT 1', [name]);
+    if (dup.length > 0) {
+      return res.status(400).json({ success: false, message: 'Chamber name already exists.' });
+    }
+
+    const [result] = await db.query('INSERT INTO chambers (name) VALUES (?)', [name]);
+
+    try {
+      const email = req.user ? req.user.email : 'system';
+      const actorLabel = req.user ? (req.user.full_name || email) : 'System';
+      await logActivity(
+        email,
+        'ADD_CHAMBER',
+        'Chamber Master',
+        `${actorLabel} created chamber "${name}" (id: ${result.insertId}).`
+      );
+    } catch (_) {}
+
+    return res.status(201).json({
+      success: true,
+      message: 'Chamber created successfully.',
+      data: { id: result.insertId, name, total_clients: null }
+    });
+  } catch (error) {
+    console.error('Error creating chamber:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create chamber.',
+      error: error.message
+    });
+  }
+};
+
+// 8. Update chamber (name and/or total_clients)
+exports.updateChamber = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) {
+      return res.status(400).json({ success: false, message: 'Chamber ID is required.' });
+    }
+
+    const [rows] = await db.query(
+      'SELECT id, name, total_clients FROM chambers WHERE id = ? LIMIT 1',
+      [id]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Chamber not found.' });
+    }
+
+    const current = rows[0];
+    let { name, total_clients } = req.body;
+    const updates = [];
+    const params = [];
+
+    if (name !== undefined) {
+      name = String(name || '').trim();
+      if (!name) {
+        return res.status(400).json({ success: false, message: 'Chamber name cannot be empty.' });
+      }
+      const [dup] = await db.query(
+        'SELECT id FROM chambers WHERE name = ? AND id != ? LIMIT 1',
+        [name, id]
+      );
+      if (dup.length > 0) {
+        return res.status(400).json({ success: false, message: 'Chamber name already exists.' });
+      }
+      updates.push('name = ?');
+      params.push(name);
+    }
+
+    if (total_clients !== undefined) {
+      if (total_clients === null || total_clients === '') {
+        updates.push('total_clients = NULL');
+      } else {
+        const n = parseInt(total_clients, 10);
+        if (!Number.isFinite(n) || n < 1 || n > 50) {
+          return res.status(400).json({
+            success: false,
+            message: 'Total clients must be a number between 1 and 50.'
+          });
+        }
+        updates.push('total_clients = ?');
+        params.push(n);
+      }
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ success: false, message: 'No fields to update.' });
+    }
+
+    params.push(id);
+    await db.query(`UPDATE chambers SET ${updates.join(', ')} WHERE id = ?`, params);
+
+    const [updated] = await db.query(
+      'SELECT id, name, total_clients FROM chambers WHERE id = ? LIMIT 1',
+      [id]
+    );
+
+    try {
+      const email = req.user ? req.user.email : 'system';
+      const actorLabel = req.user ? (req.user.full_name || email) : 'System';
+      await logActivity(
+        email,
+        'UPDATE_CHAMBER',
+        'Chamber Master',
+        `${actorLabel} updated chamber "${updated[0].name}" (total_clients: ${updated[0].total_clients ?? 'null'}).`
+      );
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: true,
+      message: 'Chamber updated successfully.',
+      data: updated[0]
+    });
+  } catch (error) {
+    console.error('Error updating chamber:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update chamber.',
+      error: error.message
+    });
+  }
+};
+
+// 9. Delete a chamber (and soft-deactivate its assignments)
+exports.deleteChamber = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) {
+      return res.status(400).json({ success: false, message: 'Chamber ID is required.' });
+    }
+
+    // DO must have Super Admin allow (ChamberMaster Delete) before deleting
+    if (req.user && req.user.role === 'do_operator') {
+      const { hasActivePermission, consumeGrantedPermission } = require('./permissionController');
+      const allowed = await hasActivePermission(req.user.email, 'ChamberMaster', id, 'Delete');
+      if (!allowed) {
+        return res.status(403).json({
+          success: false,
+          message: 'Super Admin allow required to delete this chamber. Request permission from the app first.'
+        });
+      }
+    }
+
+    const [rows] = await db.query('SELECT id, name FROM chambers WHERE id = ? LIMIT 1', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Chamber not found.' });
+    }
+    const chamberName = rows[0].name;
+
+    await db.query(
+      "UPDATE chamber_client_assignments SET status = 'inactive' WHERE chamber_id = ?",
+      [id]
+    );
+    await db.query('DELETE FROM chambers WHERE id = ?', [id]);
+
+    try {
+      if (req.user && req.user.role === 'do_operator') {
+        const { consumeGrantedPermission } = require('./permissionController');
+        await consumeGrantedPermission(req.user.email, 'ChamberMaster', id, 'Delete');
+      }
+    } catch (_) {}
+
+    try {
+      const email = req.user ? req.user.email : 'system';
+      const actorLabel = req.user ? (req.user.full_name || email) : 'System';
+      await logActivity(
+        email,
+        'DELETE_CHAMBER',
+        'Chamber Master',
+        `${actorLabel} deleted chamber "${chamberName}" (id: ${id}).`
+      );
+    } catch (_) {}
+
+    return res.status(200).json({
+      success: true,
+      message: 'Chamber deleted successfully.'
+    });
+  } catch (error) {
+    console.error('Error deleting chamber:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete chamber.',
       error: error.message
     });
   }
