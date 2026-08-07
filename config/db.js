@@ -394,18 +394,16 @@ async function testDbConnection() {
         )
       `);
       console.log('🌱 Verified chambers table is online.');
-      // total_clients: how many client lots must be logged to complete a chamber task
+      // total_clients removed — completion = Master Setup client count per chamber
       try {
         const [chCols] = await pool.query('SHOW COLUMNS FROM chambers');
         const chColNames = chCols.map((c) => c.Field);
-        if (!chColNames.includes('total_clients')) {
-          await pool.query(
-            'ALTER TABLE chambers ADD COLUMN total_clients INT NULL DEFAULT NULL AFTER name'
-          );
-          console.log('🌱 Added column total_clients to chambers.');
+        if (chColNames.includes('total_clients')) {
+          await pool.query('ALTER TABLE chambers DROP COLUMN total_clients');
+          console.log('🧹 Dropped column total_clients from chambers.');
         }
       } catch (colErr) {
-        console.warn('⚠️ chambers.total_clients migration skipped:', colErr.message);
+        console.warn('⚠️ chambers.total_clients drop skipped:', colErr.message);
       }
       // No default chamber seed — keep empty until Super Admin / DO adds real data
     } catch (chErr) {

@@ -113,10 +113,12 @@ exports.getPermissionRequests = async (req, res) => {
     if (req.user.role === 'super_admin') {
       [rows] = await db.query(`
         ${selectCols}
-        WHERE a.id IN (
+        WHERE a.log_type IN ('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster')
+          AND a.id IN (
           SELECT MAX(id)
           FROM do_operator_activities
           WHERE action IN ('REQUEST_EDIT', 'REQUEST_DELETE', 'GRANT_PERMISSION', 'GRANT_DELETE', 'DENY_PERMISSION', 'DENY_DELETE', 'USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION')
+            AND log_type IN ('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster')
           GROUP BY operator_email, log_type, permission_req
         )
         ORDER BY a.id DESC
@@ -124,15 +126,18 @@ exports.getPermissionRequests = async (req, res) => {
     } else {
       [rows] = await db.query(`
         ${selectCols}
-        WHERE a.operator_email = ? 
+        WHERE a.operator_email = ?
+          AND a.log_type IN ('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster')
           AND a.id IN (
             SELECT MAX(id)
             FROM do_operator_activities
-            WHERE action IN ('REQUEST_EDIT', 'REQUEST_DELETE', 'GRANT_PERMISSION', 'GRANT_DELETE', 'DENY_PERMISSION', 'DENY_DELETE', 'USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION')
+            WHERE operator_email = ?
+              AND action IN ('REQUEST_EDIT', 'REQUEST_DELETE', 'GRANT_PERMISSION', 'GRANT_DELETE', 'DENY_PERMISSION', 'DENY_DELETE', 'USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION')
+              AND log_type IN ('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster')
             GROUP BY operator_email, log_type, permission_req
           )
         ORDER BY a.id DESC
-      `, [req.user.email]);
+      `, [req.user.email, req.user.email]);
     }
     return res.json(rows);
   } catch (err) {

@@ -159,17 +159,17 @@ exports.getChambers = async (req, res) => {
       appliedLimit = limit;
 
       // Only bootstrap Chamber 1..N when none exist yet (so DO delete can stick)
-      const [existingAll] = await db.query('SELECT id, name, total_clients FROM chambers ORDER BY id ASC');
+      const [existingAll] = await db.query('SELECT id, name FROM chambers ORDER BY id ASC');
       const picked = pickDoChambers(existingAll, limit);
       if (picked.length === 0) {
         await ensureNumberedChambers(limit);
-        const [rows] = await db.query('SELECT id, name, total_clients FROM chambers ORDER BY id ASC');
+        const [rows] = await db.query('SELECT id, name FROM chambers ORDER BY id ASC');
         filteredRows = pickDoChambers(rows, limit);
       } else {
         filteredRows = picked;
       }
     } else {
-      const [rows] = await db.query('SELECT id, name, total_clients FROM chambers ORDER BY name ASC');
+      const [rows] = await db.query('SELECT id, name FROM chambers ORDER BY name ASC');
       filteredRows = rows;
     }
 
@@ -636,7 +636,7 @@ exports.createChamber = async (req, res) => {
         });
       }
 
-      let [existing] = await db.query('SELECT id, name, total_clients FROM chambers ORDER BY id ASC');
+      let [existing] = await db.query('SELECT id, name FROM chambers ORDER BY id ASC');
       const existingByName = existing.find(
         (c) => String(c.name || '').toLowerCase() === name.toLowerCase()
       );
@@ -669,8 +669,7 @@ exports.createChamber = async (req, res) => {
           message: 'Chamber already assigned.',
           data: {
             id: existingByName.id,
-            name: existingByName.name,
-            total_clients: existingByName.total_clients ?? null
+            name: existingByName.name
           },
           chamber_limit: limit
         });
@@ -690,7 +689,7 @@ exports.createChamber = async (req, res) => {
       }
 
       const [result] = await db.query('INSERT INTO chambers (name) VALUES (?)', [name]);
-      existing = [...existing, { id: result.insertId, name, total_clients: null }];
+      existing = [...existing, { id: result.insertId, name }];
       await ensureIncluded(result.insertId);
 
       try {
@@ -711,7 +710,7 @@ exports.createChamber = async (req, res) => {
       return res.status(201).json({
         success: true,
         message: 'Chamber created successfully.',
-        data: { id: result.insertId, name, total_clients: null },
+        data: { id: result.insertId, name },
         chamber_limit: limit
       });
     }
@@ -742,7 +741,7 @@ exports.createChamber = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Chamber created successfully.',
-      data: { id: result.insertId, name, total_clients: null }
+      data: { id: result.insertId, name }
     });
   } catch (error) {
     console.error('Error creating chamber:', error);
@@ -754,7 +753,7 @@ exports.createChamber = async (req, res) => {
   }
 };
 
-// 8. Update chamber (name and/or total_clients)
+// 8. Update chamber name
 exports.updateChamber = async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -763,59 +762,33 @@ exports.updateChamber = async (req, res) => {
     }
 
     const [rows] = await db.query(
-      'SELECT id, name, total_clients FROM chambers WHERE id = ? LIMIT 1',
+      'SELECT id, name FROM chambers WHERE id = ? LIMIT 1',
       [id]
     );
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Chamber not found.' });
     }
 
-    const current = rows[0];
-    let { name, total_clients } = req.body;
-    const updates = [];
-    const params = [];
-
-    if (name !== undefined) {
-      name = String(name || '').trim();
-      if (!name) {
-        return res.status(400).json({ success: false, message: 'Chamber name cannot be empty.' });
-      }
-      const [dup] = await db.query(
-        'SELECT id FROM chambers WHERE name = ? AND id != ? LIMIT 1',
-        [name, id]
-      );
-      if (dup.length > 0) {
-        return res.status(400).json({ success: false, message: 'Chamber name already exists.' });
-      }
-      updates.push('name = ?');
-      params.push(name);
-    }
-
-    if (total_clients !== undefined) {
-      if (total_clients === null || total_clients === '') {
-        updates.push('total_clients = NULL');
-      } else {
-        const n = parseInt(total_clients, 10);
-        if (!Number.isFinite(n) || n < 1 || n > 50) {
-          return res.status(400).json({
-            success: false,
-            message: 'Total clients must be a number between 1 and 50.'
-          });
-        }
-        updates.push('total_clients = ?');
-        params.push(n);
-      }
-    }
-
-    if (updates.length === 0) {
+    let { name } = req.body;
+    if (name === undefined) {
       return res.status(400).json({ success: false, message: 'No fields to update.' });
     }
+    name = String(name || '').trim();
+    if (!name) {
+      return res.status(400).json({ success: false, message: 'Chamber name cannot be empty.' });
+    }
+    const [dup] = await db.query(
+      'SELECT id FROM chambers WHERE name = ? AND id != ? LIMIT 1',
+      [name, id]
+    );
+    if (dup.length > 0) {
+      return res.status(400).json({ success: false, message: 'Chamber name already exists.' });
+    }
 
-    params.push(id);
-    await db.query(`UPDATE chambers SET ${updates.join(', ')} WHERE id = ?`, params);
+    await db.query('UPDATE chambers SET name = ? WHERE id = ?', [name, id]);
 
     const [updated] = await db.query(
-      'SELECT id, name, total_clients FROM chambers WHERE id = ? LIMIT 1',
+      'SELECT id, name FROM chambers WHERE id = ? LIMIT 1',
       [id]
     );
 
@@ -826,7 +799,7 @@ exports.updateChamber = async (req, res) => {
         email,
         'UPDATE_CHAMBER',
         'Chamber Master',
-        `${actorLabel} updated chamber "${updated[0].name}" (total_clients: ${updated[0].total_clients ?? 'null'}).`
+        `${actorLabel} updated chamber "${updated[0].name}".`
       );
     } catch (_) {}
 
