@@ -632,7 +632,7 @@ exports.createChamber = async (req, res) => {
       if (!allowed) {
         return res.status(403).json({
           success: false,
-          message: 'Super Admin allow required to add this chamber. Request permission from the app first.'
+          message: 'Super Admin approval is required to add this chamber. Request permission from the app first.'
         });
       }
 
@@ -833,7 +833,7 @@ exports.deleteChamber = async (req, res) => {
       if (!allowed) {
         return res.status(403).json({
           success: false,
-          message: 'Super Admin allow required to delete this chamber. Request permission from the app first.'
+          message: 'Super Admin approval is required to delete this chamber. Request permission from the app first.'
         });
       }
     }

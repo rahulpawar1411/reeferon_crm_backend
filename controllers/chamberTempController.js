@@ -292,7 +292,7 @@ exports.addChamberLog = async (req, res) => {
       created_at: new Date().toISOString()
     };
     memoryChamberLogs.unshift(newLog);
-    return res.status(201).json({ id: newLog.id, temp_sensor_image, photo_capture_time, time_variance_minutes, message: 'Chamber temperature record saved (memory).' });
+    return res.status(201).json({ id: newLog.id, temp_sensor_image, photo_capture_time, time_variance_minutes, message: 'Chamber temperature record saved temporarily.' });
   }
 };
 
@@ -493,7 +493,7 @@ exports.updateChamberLog = async (req, res) => {
         item.time_variance_minutes = calculateVariance(mergedDate, mergedTime, item.photo_capture_time);
       }
     }
-    return res.json({ message: 'Record updated in memory.' });
+    return res.json({ message: 'Record updated temporarily.' });
   }
 };
 
@@ -541,6 +541,6 @@ exports.deleteChamberLog = async (req, res) => {
       email: req.user?.email || 'system'
     });
     memoryChamberLogs = memoryChamberLogs.filter(l => l.id != id);
-    return res.json({ message: 'Record deleted from memory.' });
+    return res.json({ message: 'Record deleted temporarily.' });
   }
 };

@@ -217,11 +217,11 @@ exports.createPermissionRequest = async (req, res) => {
     let descText =
       description ||
       (record_type === 'MasterSetup'
-        ? `Master Setup opened (no Super Admin allow required).`
+        ? `Master Setup opened (Super Admin approval not required).`
         : record_type === 'ChamberMaster'
-          ? `Requested Super Admin allow for chamber master (${refText}).`
+          ? `Requested Super Admin approval for chamber master (${refText}).`
           : record_type === 'ClientMaster'
-            ? `Client master ${actionLabel} notified to Super Admin (${refText}) — no allow required.`
+            ? `Client master ${actionLabel} notified to Super Admin (${refText}) — approval not required.`
             : `Requested permission to ${actionLabel} ${record_type} log (${refText})`);
 
     const resolvedRemark =
@@ -621,7 +621,7 @@ exports.getRecordPermissionHistory = async (req, res) => {
     return handleControllerError(res, err, {
       checkpoint: 'getRecordPermissionHistory',
       req,
-      clientMessage: 'Failed to fetch Super Allow history for this record.'
+      clientMessage: 'Failed to load approval history for this record.'
     });
   }
 };
