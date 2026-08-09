@@ -22,8 +22,19 @@ exports.getDashboardStats = async (req, res) => {
     // 3. Calculate total pipeline value (INR)
     const [valueRows] = await db.query('SELECT SUM(value) as totalValue FROM leads');
 
-    // 4. Sub admins and operators count
-    const [subRows] = await db.query('SELECT COUNT(*) as totalSubAdmins FROM sub_admins');
+    // 4. Customers and operators count
+    let totalCustomers = 0;
+    try {
+      const [subRows] = await db.query('SELECT COUNT(*) as totalCustomers FROM customers');
+      totalCustomers = subRows[0].totalCustomers || 0;
+    } catch (err) {
+      if (err.code === 'ER_NO_SUCH_TABLE') {
+        const [subRows] = await db.query('SELECT COUNT(*) as totalCustomers FROM sub_admins');
+        totalCustomers = subRows[0].totalCustomers || 0;
+      } else {
+        throw err;
+      }
+    }
     const [operatorRows] = await db.query('SELECT COUNT(*) as totalOperators FROM do_operators');
 
     // 5. Calculate Overdue chamber inspections for the past 5 days
@@ -87,7 +98,8 @@ exports.getDashboardStats = async (req, res) => {
         inProgressLeads: inProgressRows[0].inProgressLeads || 0,
         wonLeads: wonRows[0].wonLeads || 0,
         totalValue: parseFloat(valueRows[0].totalValue || 0),
-        totalSubAdmins: subRows[0].totalSubAdmins || 0,
+        totalSubAdmins: totalCustomers,
+        totalCustomers,
         totalOperators: operatorRows[0].totalOperators || 0,
         overdueInspections: overdueCount
       }
@@ -103,18 +115,40 @@ exports.getDashboardStats = async (req, res) => {
 };
 
 /**
- * GET DISTINCT CLIENTS & WAREHOUSES (for Sub-Admin access scope selection)
+ * GET DISTINCT CLIENTS & WAREHOUSES (for Customer access scope selection)
+ * Includes every client name that has saved data (logs + master assignments),
+ * even after the Data Operator account is deleted.
  */
 exports.getAccessScopeOptions = async (req, res) => {
   try {
     const clientSet = new Set();
     const warehouseSet = new Set();
+    const warehouseClients = new Map(); // warehouse -> Set(client)
+
+    const addWarehouseClient = (warehouse, client) => {
+      const wh = warehouse != null ? String(warehouse).trim() : '';
+      const cl = client != null ? String(client).trim() : '';
+      if (!wh || !cl) return;
+      if (!warehouseClients.has(wh)) warehouseClients.set(wh, new Set());
+      warehouseClients.get(wh).add(cl);
+      warehouseSet.add(wh);
+      clientSet.add(cl);
+    };
 
     const clientQueries = [
+      // Clients added to chambers in Master Setup (DB assignments) — include even if inactive / DO deleted
+      `SELECT DISTINCT cca.client_name AS name
+       FROM chamber_client_assignments cca
+       INNER JOIN chambers c ON c.id = cca.chamber_id
+       WHERE cca.client_name IS NOT NULL AND TRIM(cca.client_name) != ''`,
+      // Fallback if join fails older DBs: assignments without requiring chamber row
+      `SELECT DISTINCT client_name AS name FROM chamber_client_assignments WHERE client_name IS NOT NULL AND TRIM(client_name) != ''`,
       `SELECT DISTINCT client_name AS name FROM daily_chamber_temp_logs WHERE client_name IS NOT NULL AND TRIM(client_name) != ''`,
       `SELECT DISTINCT inward_client_name AS name FROM inward_temp_logs WHERE inward_client_name IS NOT NULL AND TRIM(inward_client_name) != ''`,
       `SELECT DISTINCT outward_client_name AS name FROM outward_temp_logs WHERE outward_client_name IS NOT NULL AND TRIM(outward_client_name) != ''`,
-      `SELECT DISTINCT client_name AS name FROM daily_temp_logs WHERE client_name IS NOT NULL AND TRIM(client_name) != ''`
+      `SELECT DISTINCT client_name AS name FROM daily_temp_logs WHERE client_name IS NOT NULL AND TRIM(client_name) != ''`,
+      `SELECT DISTINCT client_name AS name FROM leads WHERE client_name IS NOT NULL AND TRIM(client_name) != ''`,
+      `SELECT DISTINCT client_name AS name FROM inward_outward_logs WHERE client_name IS NOT NULL AND TRIM(client_name) != ''`
     ];
 
     for (const sql of clientQueries) {
@@ -148,10 +182,80 @@ exports.getAccessScopeOptions = async (req, res) => {
       }
     }
 
-    const clients = [...clientSet].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-    const warehouses = [...warehouseSet].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    // Warehouse → client pairs (for cascading Customer client dropdown)
+    const pairQueries = [
+      `SELECT DISTINCT warehouse_name, client_name
+       FROM chamber_client_assignments
+       WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''
+         AND client_name IS NOT NULL AND TRIM(client_name) != ''`,
+      `SELECT DISTINCT warehouse_name, client_name
+       FROM daily_chamber_temp_logs
+       WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''
+         AND client_name IS NOT NULL AND TRIM(client_name) != ''`,
+      `SELECT DISTINCT warehouse_name, inward_client_name AS client_name
+       FROM inward_temp_logs
+       WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''
+         AND inward_client_name IS NOT NULL AND TRIM(inward_client_name) != ''`,
+      `SELECT DISTINCT warehouse_name, outward_client_name AS client_name
+       FROM outward_temp_logs
+       WHERE warehouse_name IS NOT NULL AND TRIM(warehouse_name) != ''
+         AND outward_client_name IS NOT NULL AND TRIM(outward_client_name) != ''`,
+      // DO warehouse + chamber assignment clients (via chambers.warehouse_name if present)
+      `SELECT DISTINCT COALESCE(cca.warehouse_name, c.warehouse_name, op.warehouse_name) AS warehouse_name,
+              cca.client_name AS client_name
+       FROM chamber_client_assignments cca
+       LEFT JOIN chambers c ON c.id = cca.chamber_id
+       LEFT JOIN do_operators op ON LOWER(TRIM(op.email)) = LOWER(TRIM(c.operator_email))
+       WHERE cca.client_name IS NOT NULL AND TRIM(cca.client_name) != ''`
+    ];
 
-    return res.json({ clients, warehouses });
+    for (const sql of pairQueries) {
+      try {
+        const [rows] = await db.query(sql);
+        rows.forEach((row) => addWarehouseClient(row.warehouse_name, row.client_name));
+      } catch (tableErr) {
+        console.warn('Access scope warehouse-client pair query skipped:', tableErr.message);
+      }
+    }
+
+    // Case-insensitive unique display names (prefer first-seen casing)
+    const uniqueClients = [];
+    const seenClients = new Set();
+    [...clientSet]
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+      .forEach((name) => {
+        const key = name.toLowerCase();
+        if (seenClients.has(key)) return;
+        seenClients.add(key);
+        uniqueClients.push(name);
+      });
+
+    const warehouses = [...warehouseSet].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' })
+    );
+
+    const warehouseClientMap = {};
+    [...warehouseClients.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { sensitivity: 'base' }))
+      .forEach(([wh, clients]) => {
+        const unique = [];
+        const seen = new Set();
+        [...clients]
+          .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+          .forEach((name) => {
+            const key = name.toLowerCase();
+            if (seen.has(key)) return;
+            seen.add(key);
+            unique.push(name);
+          });
+        warehouseClientMap[wh] = unique;
+      });
+
+    return res.json({
+      clients: uniqueClients,
+      warehouses,
+      warehouseClients: warehouseClientMap
+    });
   } catch (error) {
     console.error('Error fetching access scope options:', error);
     return res.status(500).json({ error: 'Failed to fetch options.' });

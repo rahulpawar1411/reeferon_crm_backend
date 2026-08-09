@@ -44,14 +44,29 @@ const getTableForRole = (role) => {
   switch (role) {
     case 'super_admin':
       return 'super_admin';
-    case 'sub_admin':
-      return 'sub_admins';
+    case 'customer':
+      return 'customers';
+    case 'sub_admin': // legacy alias → same table after rename
+      return 'customers';
     case 'do_operator':
       return 'do_operators';
     default:
       return null;
   }
 };
+
+/** SELECT from customers, with legacy sub_admins fallback if rename not applied yet. */
+async function queryCustomers(sqlWithCustomers, params = []) {
+  try {
+    return await db.query(sqlWithCustomers, params);
+  } catch (err) {
+    if (err.code === 'ER_NO_SUCH_TABLE' && /customers/i.test(sqlWithCustomers)) {
+      const legacySql = sqlWithCustomers.replace(/\bcustomers\b/gi, 'sub_admins');
+      return await db.query(legacySql, params);
+    }
+    throw err;
+  }
+}
 
 function lockedResponse(lockInfo) {
   const mins = lockInfo.minutesLeft || 30;
@@ -83,7 +98,7 @@ exports.login = async (req, res) => {
 
     const cleanEmail = email.trim().toLowerCase();
 
-    // 1b. Temporary lockout check (all roles: super_admin / sub_admin / do_operator)
+    // 1b. Temporary lockout check (all roles: super_admin / customer / do_operator)
     const lockState = await checkLoginLock(cleanEmail);
     if (lockState.locked) {
       await logActivity(
@@ -104,11 +119,11 @@ exports.login = async (req, res) => {
       user = superRows[0];
       resolvedRole = 'super_admin';
     } else {
-      // B. Check in sub_admins table
-      const [subRows] = await db.query('SELECT * FROM sub_admins WHERE email = ? LIMIT 1', [cleanEmail]);
+      // B. Check in customers table (legacy: sub_admins)
+      const [subRows] = await queryCustomers('SELECT * FROM customers WHERE email = ? LIMIT 1', [cleanEmail]);
       if (subRows.length > 0) {
         user = subRows[0];
-        resolvedRole = 'sub_admin';
+        resolvedRole = 'customer';
       } else {
         // C. Check in do_operators table
         const [doRows] = await db.query('SELECT * FROM do_operators WHERE email = ? LIMIT 1', [cleanEmail]);
@@ -400,11 +415,11 @@ exports.changeSuperAdminPassword = async (req, res) => {
         });
       }
 
-      const [subDup] = await db.query('SELECT id FROM sub_admins WHERE email = ? LIMIT 1', [nextEmail]);
+      const [subDup] = await queryCustomers('SELECT id FROM customers WHERE email = ? LIMIT 1', [nextEmail]);
       if (subDup.length) {
         return res.status(409).json({
           success: false,
-          message: 'This email is already used by a Sub-Admin account.'
+          message: 'This email is already used by a Customer account.'
         });
       }
 

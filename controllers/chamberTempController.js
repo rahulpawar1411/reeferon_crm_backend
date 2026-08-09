@@ -8,7 +8,13 @@ const exifr = require('exifr');
 const fs = require('fs');
 const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
-const { parsePagination, sendPaginated, appendWarehouseFilter } = require('../utils/pagination');
+const {
+  parsePagination,
+  sendPaginated,
+  appendWarehouseFilter,
+  appendClientFilter,
+  appendSubAdminAccessScope
+} = require('../utils/pagination');
 const { logErrorCheckpoint } = require('../utils/errorHandler');
 const {
   hasActivePermission,
@@ -83,25 +89,11 @@ exports.getChamberLogs = async (req, res) => {
       params.push(req.user.warehouse_name);
     }
 
-    // Sub-Admin scoped filtering by allowed clients & warehouses
-    if (req.user && req.user.role === 'sub_admin') {
-      if (req.user.allowed_clients) {
-        const clients = req.user.allowed_clients.split(',').map(c => c.trim()).filter(Boolean);
-        if (clients.length > 0) {
-          const placeholders = clients.map(() => '?').join(', ');
-          conditions.push(`client_name IN (${placeholders})`);
-          params.push(...clients);
-        }
-      }
-      if (req.user.allowed_warehouses) {
-        const warehouses = req.user.allowed_warehouses.split(',').map(w => w.trim()).filter(Boolean);
-        if (warehouses.length > 0) {
-          const placeholders = warehouses.map(() => '?').join(', ');
-          conditions.push(`(warehouse_name IN (${placeholders}) OR warehouse_name IS NULL)`);
-          params.push(...warehouses);
-        }
-      }
-    }
+    // Customer scoped filtering by allowed clients & warehouses (live DB names, case-insensitive)
+    appendSubAdminAccessScope(conditions, params, req.user, {
+      clientColumn: 'client_name',
+      warehouseColumn: 'warehouse_name'
+    });
 
     if (search) {
       conditions.push('(reference_no LIKE ? OR client_name LIKE ? OR chamber_name LIKE ? OR monitor_supervisor_name LIKE ? OR inspection_time LIKE ? OR operator_email LIKE ?)');
@@ -119,6 +111,7 @@ exports.getChamberLogs = async (req, res) => {
     }
 
     appendWarehouseFilter(conditions, params, req.query, req.user);
+    appendClientFilter(conditions, params, req.query, req.user);
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -439,7 +432,7 @@ exports.updateChamberLog = async (req, res) => {
       id
     ]);
 
-    // Log Operator Activity (includes Super Admin / Sub Admin / DO updates)
+    // Log Operator Activity (includes Super Admin / Customer / DO updates)
     const refNo = (existingRows[0] && existingRows[0].reference_no) || `RF-CH-26-${String(id).padStart(4, '0')}`;
     await logActivity(
       req.user ? req.user.email : 'unknown',

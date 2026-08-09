@@ -1,7 +1,7 @@
--- Sub-Admins table (profile + DO-based access scope)
+-- Customers table (profile + DO-based access scope; formerly sub_admins)
 USE reeferon_crm_db;
 
-CREATE TABLE IF NOT EXISTS sub_admins (
+CREATE TABLE IF NOT EXISTS customers (
   id INT AUTO_INCREMENT PRIMARY KEY,
   email VARCHAR(150) NOT NULL UNIQUE,
   password VARCHAR(255) NOT NULL,

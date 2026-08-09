@@ -1,11 +1,22 @@
 /**
- * Clear all operational data; keep super_admin rows only (id + password untouched).
+ * Clear operational accounts/config; keep Super Admin + history log tables.
  * Usage: npm run db:clear-keep-super-admin
+ *
+ * Keeps:
+ * - super_admin
+ * - daily_chamber_temp_logs / inward_temp_logs / outward_temp_logs (System History)
+ * - do_operator_activities (audit trail)
  */
 require('dotenv').config();
 const mysql = require('mysql2/promise');
 
-const KEEP_TABLES = new Set(['super_admin']);
+const KEEP_TABLES = new Set([
+  'super_admin',
+  'daily_chamber_temp_logs',
+  'inward_temp_logs',
+  'outward_temp_logs',
+  'do_operator_activities'
+]);
 
 async function run() {
   const pool = await mysql.createPool({
@@ -21,7 +32,9 @@ async function run() {
   const conn = await pool.getConnection();
   try {
     const dbName = process.env.DB_NAME || 'reeferon_crm_db';
-    console.log(`Clearing data on ${process.env.DB_HOST} / ${dbName} (keeping: super_admin)…`);
+    console.log(
+      `Clearing data on ${process.env.DB_HOST} / ${dbName} (keeping: ${[...KEEP_TABLES].join(', ')})…`
+    );
 
     const [tables] = await conn.query(
       `SELECT TABLE_NAME AS name

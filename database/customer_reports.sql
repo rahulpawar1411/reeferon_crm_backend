@@ -1,4 +1,4 @@
--- Dedicated table for customer (Sub Admin) issue reports
+-- Dedicated table for customer issue reports
 CREATE TABLE IF NOT EXISTS customer_reports (
   id INT AUTO_INCREMENT PRIMARY KEY,
   customer_id INT DEFAULT NULL,

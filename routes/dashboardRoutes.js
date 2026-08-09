@@ -10,7 +10,7 @@ const dashboardController = require('../controllers/dashboardController');
 router.get('/stats', dashboardController.getDashboardStats);
 router.get('/', dashboardController.getDashboardStats);
 
-// GET /api/dashboard/access-options - Fetch distinct clients & warehouses for sub-admin scope
+// GET /api/dashboard/access-options - Fetch distinct clients & warehouses for customer scope
 router.get('/access-options', dashboardController.getAccessScopeOptions);
 
 // GET /api/dashboard/inventory-filter-options - Live warehouse → client lists from DB

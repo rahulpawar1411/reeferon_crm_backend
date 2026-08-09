@@ -121,21 +121,22 @@ const chamberRoutes = require('./routes/chamberRoutes');
 app.use('/api/auth/login', loginRateLimiter);
 app.use('/api/auth', authRoutes);
 
-app.use('/api/chambers', verifyToken, requireRole(['super_admin', 'sub_admin', 'do_operator']), chamberRoutes);
-app.use('/api/leads', verifyToken, requireRole(['super_admin', 'sub_admin']), leadRoutes);
-app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'sub_admin']), dashboardRoutes);
-app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'sub_admin', 'do_operator']), tempRoutes);
-app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'sub_admin', 'do_operator']), chamberTempRoutes);
-app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'sub_admin', 'do_operator']), inwardRoutes);
-app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'sub_admin', 'do_operator']), outwardRoutes);
+app.use('/api/chambers', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), chamberRoutes);
+app.use('/api/leads', verifyToken, requireRole(['super_admin', 'customer']), leadRoutes);
+app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'customer']), dashboardRoutes);
+app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), tempRoutes);
+app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), chamberTempRoutes);
+app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), inwardRoutes);
+app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), outwardRoutes);
 app.use('/api/do-operators', verifyToken, requireRole(['super_admin']), operatorRoutes);
-app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), subAdminRoutes);
-app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'sub_admin', 'do_operator']), activityRoutes);
+app.use('/api/customers', verifyToken, requireRole(['super_admin']), subAdminRoutes);
+app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), subAdminRoutes); // legacy alias
+app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), activityRoutes);
 app.use('/api/permission-requests', permissionRoutes);
 app.use(
   '/api/customer-reports',
   verifyToken,
-  requireRole(['sub_admin', 'super_admin']),
+  requireRole(['customer', 'super_admin']),
   require('./routes/customerReportRoutes')
 );
 

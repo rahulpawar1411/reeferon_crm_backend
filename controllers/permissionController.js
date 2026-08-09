@@ -739,7 +739,7 @@ exports.consumeGrantedPermission = async (operatorEmail, recordType, recordId, a
 
 /**
  * Returns true if DO may proceed (system Allow, or active GRANT not yet used).
- * Super Admin / Sub Admin callers should not use this gate.
+ * Super Admin / Customer callers should not use this gate.
  */
 exports.hasActivePermission = async (operatorEmail, recordType, recordId, action = 'Edit') => {
   const configKey = `${recordType}_${action}`;

@@ -1,6 +1,6 @@
 // ====================================================================
-// Sub-Admin Routes (backend/routes/subAdminRoutes.js)
-// Defines API endpoints for Super Admin to CRUD Sub-Admin accounts.
+// Customer Routes (backend/routes/subAdminRoutes.js)
+// Defines API endpoints for Super Admin to CRUD Customer accounts.
 // ====================================================================
 
 const express = require('express');

@@ -1,6 +1,6 @@
 // ====================================================================
 // Customer Report Controller
-// Sub Admin submits issues; Super Admin reviews with full customer identity
+// Customer submits issues; Super Admin reviews with full customer identity
 // Table: customer_reports
 // ====================================================================
 
@@ -13,18 +13,31 @@ const ALLOWED_STATUSES = ['Open', 'In Progress', 'Resolved', 'Closed'];
 async function loadCustomerIdentity(email) {
   const clean = String(email || '').trim().toLowerCase();
   if (!clean) return null;
-  const [rows] = await db.query(
-    `SELECT id, email, full_name, phone_no, allowed_clients, allowed_warehouses
-     FROM sub_admins WHERE email = ? LIMIT 1`,
-    [clean]
-  );
-  return rows[0] || null;
+  try {
+    const [rows] = await db.query(
+      `SELECT id, email, full_name, phone_no, allowed_clients, allowed_warehouses
+       FROM customers WHERE email = ? LIMIT 1`,
+      [clean]
+    );
+    return rows[0] || null;
+  } catch (err) {
+    if (err.code === 'ER_NO_SUCH_TABLE') {
+      const [rows] = await db.query(
+        `SELECT id, email, full_name, phone_no, allowed_clients, allowed_warehouses
+         FROM sub_admins WHERE email = ? LIMIT 1`,
+        [clean]
+      );
+      return rows[0] || null;
+    }
+    throw err;
+  }
 }
 
-/** POST / — Sub Admin creates a report */
+/** POST / — Customer creates a report */
 exports.createCustomerReport = async (req, res) => {
   try {
-    if (req.user?.role !== 'sub_admin' && req.user?.role !== 'super_admin') {
+    const role = req.user?.role === 'sub_admin' ? 'customer' : req.user?.role;
+    if (role !== 'customer' && role !== 'super_admin') {
       return res.status(403).json({ error: 'Only customers can submit reports.' });
     }
 
@@ -114,8 +127,8 @@ exports.getCustomerReports = async (req, res) => {
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const [rows] = await db.query(
-      `SELECT
+    const listSql = (joinTable) => `
+      SELECT
          r.id,
          r.customer_id,
          r.customer_email,
@@ -135,7 +148,7 @@ exports.getCustomerReports = async (req, res) => {
          sa.allowed_clients AS live_allowed_clients,
          sa.allowed_warehouses AS live_allowed_warehouses
        FROM customer_reports r
-       LEFT JOIN sub_admins sa ON sa.email = r.customer_email
+       LEFT JOIN ${joinTable} sa ON sa.email = r.customer_email
        ${where}
        ORDER BY
          CASE r.status
@@ -144,9 +157,18 @@ exports.getCustomerReports = async (req, res) => {
            WHEN 'Resolved' THEN 2
            ELSE 3
          END,
-         r.created_at DESC`,
-      params
-    );
+         r.created_at DESC`;
+
+    let rows;
+    try {
+      [rows] = await db.query(listSql('customers'), params);
+    } catch (err) {
+      if (err.code === 'ER_NO_SUCH_TABLE') {
+        [rows] = await db.query(listSql('sub_admins'), params);
+      } else {
+        throw err;
+      }
+    }
 
     const reports = (rows || []).map((row) => ({
       id: row.id,

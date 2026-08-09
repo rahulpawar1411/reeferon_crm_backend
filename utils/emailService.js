@@ -291,7 +291,7 @@ async function sendOperatorCredentialsEmail({
 
 async function sendSubAdminCredentialsEmail({ email, password, full_name }) {
   const payload = {
-    roleLabel: 'Sub-Admin',
+    roleLabel: 'Customer',
     fullName: full_name,
     email,
     password,

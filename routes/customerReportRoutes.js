@@ -1,6 +1,6 @@
 // ====================================================================
 // Customer Report Routes
-// POST  /api/customer-reports          — Sub Admin submit
+// POST  /api/customer-reports          — Customer submit
 // GET   /api/customer-reports          — Super Admin list
 // PATCH /api/customer-reports/:id/status — Super Admin status update
 // ====================================================================

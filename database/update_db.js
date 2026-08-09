@@ -111,7 +111,7 @@ async function run() {
       console.log("ℹ️ material_temp column already exists.");
     }
 
-    // 3. Create DO Operators, Super Admin, and Sub Admins tables
+    // 3. Create DO Operators, Super Admin, and Customers tables
     await db.query(`
       CREATE TABLE IF NOT EXISTS do_operators (
         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -132,8 +132,23 @@ async function run() {
     `);
     console.log("✅ super_admin table verified/created successfully.");
 
+    // Rename legacy sub_admins → customers before CREATE (avoid empty customers blocking rename)
+    try {
+      const [tables] = await db.query(
+        `SELECT TABLE_NAME AS name FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('sub_admins', 'customers')`
+      );
+      const names = new Set(tables.map((t) => t.name));
+      if (names.has('sub_admins') && !names.has('customers')) {
+        await db.query('RENAME TABLE sub_admins TO customers');
+        console.log('↪ Renamed sub_admins → customers');
+      }
+    } catch (renameErr) {
+      console.warn('⚠️ sub_admins rename skipped:', renameErr.message);
+    }
+
     await db.query(`
-      CREATE TABLE IF NOT EXISTS sub_admins (
+      CREATE TABLE IF NOT EXISTS customers (
         id INT AUTO_INCREMENT PRIMARY KEY,
         email VARCHAR(150) NOT NULL UNIQUE,
         password VARCHAR(255) NOT NULL,
@@ -145,21 +160,21 @@ async function run() {
         updated_at TIMESTAMP NULL DEFAULT NULL
       )
     `);
-    console.log("✅ sub_admins table verified/created successfully.");
+    console.log("✅ customers table verified/created successfully.");
 
-    const [subCols] = await db.query('SHOW COLUMNS FROM sub_admins');
+    const [subCols] = await db.query('SHOW COLUMNS FROM customers');
     const subColNames = subCols.map((c) => c.Field);
     const subAlters = [
-      { name: 'full_name', sql: 'ALTER TABLE sub_admins ADD COLUMN full_name VARCHAR(150) DEFAULT NULL' },
-      { name: 'phone_no', sql: 'ALTER TABLE sub_admins ADD COLUMN phone_no VARCHAR(20) DEFAULT NULL' },
-      { name: 'allowed_clients', sql: 'ALTER TABLE sub_admins ADD COLUMN allowed_clients TEXT DEFAULT NULL' },
-      { name: 'allowed_warehouses', sql: 'ALTER TABLE sub_admins ADD COLUMN allowed_warehouses TEXT DEFAULT NULL' },
-      { name: 'updated_at', sql: 'ALTER TABLE sub_admins ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL' }
+      { name: 'full_name', sql: 'ALTER TABLE customers ADD COLUMN full_name VARCHAR(150) DEFAULT NULL' },
+      { name: 'phone_no', sql: 'ALTER TABLE customers ADD COLUMN phone_no VARCHAR(20) DEFAULT NULL' },
+      { name: 'allowed_clients', sql: 'ALTER TABLE customers ADD COLUMN allowed_clients TEXT DEFAULT NULL' },
+      { name: 'allowed_warehouses', sql: 'ALTER TABLE customers ADD COLUMN allowed_warehouses TEXT DEFAULT NULL' },
+      { name: 'updated_at', sql: 'ALTER TABLE customers ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL' }
     ];
     for (const { name, sql } of subAlters) {
       if (!subColNames.includes(name)) {
         await db.query(sql);
-        console.log(`➕ Added ${name} column to sub_admins.`);
+        console.log(`➕ Added ${name} column to customers.`);
       }
     }
 
@@ -171,7 +186,7 @@ async function run() {
       await db.query("INSERT INTO super_admin (email, password) VALUES (?, ?)", ["admin@reeferon.com", hashedPass]);
       console.log("🌱 Default Super Admin user seeded (admin@reeferon.com / admin123).");
     }
-    // No default Sub-Admin / DO Operator seed — create those from Super Admin UI
+    // No default Customer / DO Operator seed — create those from Super Admin UI
     
     console.log("🎉 Database schema verification completed successfully!");
     process.exit(0);

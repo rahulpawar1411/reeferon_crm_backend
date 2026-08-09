@@ -7,7 +7,6 @@ function parsePagination(query, options = {}) {
   const exportMax = options.exportMax ?? 2000;
   const isExport = query.export === '1' || query.export === 'true';
   const cap = isExport ? exportMax : maxLimit;
-
   const page = Math.max(1, parseInt(String(query.page || '1'), 10) || 1);
   let limit = parseInt(String(query.limit || String(defaultLimit)), 10) || defaultLimit;
   limit = Math.min(Math.max(1, limit), cap);
@@ -27,18 +26,79 @@ function sendPaginated(res, items, total, page, limit) {
   });
 }
 
-/** Super Admin history: filter by warehouse query (?warehouse=Name or Generic). */
-function appendWarehouseFilter(conditions, params, query, user) {
-  const warehouse = query.warehouse;
-  if (!warehouse || warehouse === 'All') return;
-  if (!user || user.role !== 'super_admin') return;
-  if (warehouse === 'Generic') {
-    conditions.push('(warehouse_name IS NULL OR warehouse_name = ? OR warehouse_name = \'\')');
-    params.push('Generic');
-  } else {
-    conditions.push('warehouse_name = ?');
-    params.push(warehouse);
+function parseCsvNames(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v || '').trim()).filter(Boolean);
+  }
+  return String(value)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Customer access scope from assigned client / warehouse names (case-insensitive).
+ * - Clients only → filter by client_name
+ * - Warehouses only → filter by warehouse_name (NULL/empty also allowed)
+ * - Both → client match AND (warehouse match OR warehouse missing on log)
+ * Accepts legacy role `sub_admin` as customer.
+ */
+function appendSubAdminAccessScope(conditions, params, user, options = {}) {
+  const role = user?.role === 'sub_admin' ? 'customer' : user?.role;
+  if (!user || role !== 'customer') return;
+
+  const clientColumn = options.clientColumn || 'client_name';
+  const warehouseColumn = options.warehouseColumn || 'warehouse_name';
+
+  const clients = parseCsvNames(user.allowed_clients).map((c) => c.toLowerCase());
+  const warehouses = parseCsvNames(user.allowed_warehouses).map((w) => w.toLowerCase());
+
+  if (clients.length > 0) {
+    const placeholders = clients.map(() => '?').join(', ');
+    conditions.push(`LOWER(TRIM(COALESCE(${clientColumn}, ''))) IN (${placeholders})`);
+    params.push(...clients);
+  }
+
+  if (warehouses.length > 0) {
+    const placeholders = warehouses.map(() => '?').join(', ');
+    conditions.push(
+      `(${warehouseColumn} IS NULL OR TRIM(COALESCE(${warehouseColumn}, '')) = '' OR LOWER(TRIM(${warehouseColumn})) IN (${placeholders}))`
+    );
+    params.push(...warehouses);
   }
 }
 
-module.exports = { parsePagination, sendPaginated, appendWarehouseFilter };
+/** Optional warehouse filter for Super Admin / Customer list views. */
+function appendWarehouseFilter(conditions, params, query, user) {
+  const warehouse = query.warehouse;
+  if (!warehouse || warehouse === 'All') return;
+  const role = user?.role === 'sub_admin' ? 'customer' : user?.role;
+  if (!user || (role !== 'super_admin' && role !== 'customer')) return;
+  if (warehouse === 'Generic') {
+    conditions.push(`(warehouse_name IS NULL OR TRIM(COALESCE(warehouse_name, '')) = '' OR LOWER(TRIM(warehouse_name)) = ?)`);
+    params.push('generic');
+  } else {
+    conditions.push('LOWER(TRIM(COALESCE(warehouse_name, \'\'))) = ?');
+    params.push(String(warehouse).trim().toLowerCase());
+  }
+}
+
+/** Optional client filter for Customer / Super Admin list views. */
+function appendClientFilter(conditions, params, query, user) {
+  const client = query.client;
+  if (!client || client === 'All') return;
+  const role = user?.role === 'sub_admin' ? 'customer' : user?.role;
+  if (!user || (role !== 'super_admin' && role !== 'customer')) return;
+  conditions.push('LOWER(TRIM(COALESCE(client_name, \'\'))) = ?');
+  params.push(String(client).trim().toLowerCase());
+}
+
+module.exports = {
+  parsePagination,
+  sendPaginated,
+  parseCsvNames,
+  appendSubAdminAccessScope,
+  appendWarehouseFilter,
+  appendClientFilter
+};

@@ -6,6 +6,34 @@
 const jwt = require('jsonwebtoken');
 const db = require('../config/db');
 
+/** Normalize legacy role string after JWT decode. */
+function normalizeRole(role) {
+  if (role === 'sub_admin') return 'customer';
+  return role;
+}
+
+/**
+ * Load customer profile from `customers`, falling back to legacy `sub_admins`.
+ */
+async function loadCustomerByEmail(email) {
+  try {
+    const [rows] = await db.query(
+      'SELECT id, allowed_clients, allowed_warehouses, full_name, phone_no FROM customers WHERE email = ? LIMIT 1',
+      [email]
+    );
+    return rows;
+  } catch (err) {
+    if (err.code === 'ER_NO_SUCH_TABLE') {
+      const [rows] = await db.query(
+        'SELECT id, allowed_clients, allowed_warehouses, full_name, phone_no FROM sub_admins WHERE email = ? LIMIT 1',
+        [email]
+      );
+      return rows;
+    }
+    throw err;
+  }
+}
+
 /**
  * 1. Global Authentication Verification Middleware
  * Extracts the JWT token from HttpOnly cookies and verifies its signature.
@@ -14,7 +42,7 @@ exports.verifyToken = async (req, res, next) => {
   try {
     // Read token from cookies or Authorization header
     let token = req.cookies.token;
-    
+
     if (!token && req.headers.authorization) {
       const authHeader = req.headers.authorization;
       if (authHeader.startsWith('Bearer ')) {
@@ -30,19 +58,37 @@ exports.verifyToken = async (req, res, next) => {
     }
 
     // Verify JWT Signature
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'ReeferON_SuperSecured_JWT_Secret_Token_Key_2026');
-    
-    // Check if the user still exists in the database
+    const decoded = jwt.verify(
+      token,
+      process.env.JWT_SECRET || 'ReeferON_SuperSecured_JWT_Secret_Token_Key_2026'
+    );
+
+    // Legacy tokens may still carry role=sub_admin
+    decoded.role = normalizeRole(decoded.role);
+
+    // Check if the user still exists in the database (and refresh live access fields)
     let userExists = false;
     try {
       if (decoded.role === 'super_admin') {
-        const [rows] = await db.query('SELECT id FROM super_admin WHERE email = ? LIMIT 1', [decoded.email]);
+        const [rows] = await db.query('SELECT id FROM super_admin WHERE email = ? LIMIT 1', [
+          decoded.email
+        ]);
         if (rows.length > 0) userExists = true;
-      } else if (decoded.role === 'sub_admin') {
-        const [rows] = await db.query('SELECT id FROM sub_admins WHERE email = ? LIMIT 1', [decoded.email]);
-        if (rows.length > 0) userExists = true;
+      } else if (decoded.role === 'customer') {
+        const rows = await loadCustomerByEmail(decoded.email);
+        if (rows.length > 0) {
+          userExists = true;
+          // Always use latest Super Admin access (do not rely on stale JWT alone)
+          decoded.id = rows[0].id;
+          decoded.allowed_clients = rows[0].allowed_clients;
+          decoded.allowed_warehouses = rows[0].allowed_warehouses;
+          if (rows[0].full_name) decoded.full_name = rows[0].full_name;
+          if (rows[0].phone_no) decoded.phone_no = rows[0].phone_no;
+        }
       } else if (decoded.role === 'do_operator') {
-        const [rows] = await db.query('SELECT id FROM do_operators WHERE email = ? LIMIT 1', [decoded.email]);
+        const [rows] = await db.query('SELECT id FROM do_operators WHERE email = ? LIMIT 1', [
+          decoded.email
+        ]);
         if (rows.length > 0) userExists = true;
       }
     } catch (dbErr) {
@@ -59,11 +105,11 @@ exports.verifyToken = async (req, res, next) => {
 
     // Attach decoded user context (id, email, role) to the request object
     req.user = decoded;
-    
+
     return next();
   } catch (error) {
     console.error('❌ JWT Verification Error:', error.message);
-    
+
     // Handle specific JWT Errors cleanly
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({
@@ -71,7 +117,7 @@ exports.verifyToken = async (req, res, next) => {
         message: 'Your session has expired. Please log in again.'
       });
     }
-    
+
     return res.status(403).json({
       success: false,
       message: 'Invalid signature or corrupt token. Authentication failed.'
@@ -81,7 +127,7 @@ exports.verifyToken = async (req, res, next) => {
 
 /**
  * 2. Role Authorization Middleware Helper
- * Restricts route access to specific roles (e.g. ['super_admin', 'sub_admin']).
+ * Restricts route access to specific roles (e.g. ['super_admin', 'customer']).
  * Must be mounted AFTER verifyToken middleware.
  */
 exports.requireRole = (allowedRoles = []) => {
@@ -113,3 +159,5 @@ exports.requireRole = (allowedRoles = []) => {
     }
   };
 };
+
+exports.normalizeRole = normalizeRole;

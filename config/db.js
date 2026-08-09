@@ -11,17 +11,24 @@ dotenv.config();
 
 // Create a connection pool (Reuses DB connections automatically)
 // Supports connection string (DATABASE_URL) or individual parameters
+// timezone +05:30 so "today" matches India (customer/DO local date)
+const poolOptions = {
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  timezone: '+05:30',
+  dateStrings: true
+};
+
 const pool = process.env.DATABASE_URL
-  ? mysql.createPool(process.env.DATABASE_URL)
+  ? mysql.createPool({ uri: process.env.DATABASE_URL, ...poolOptions })
   : mysql.createPool({
       host: process.env.DB_HOST || 'localhost',
       user: process.env.DB_USER || 'root',
       password: process.env.DB_PASSWORD || '',
       database: process.env.DB_NAME || 'reeferon_crm_db',
       port: process.env.DB_PORT || 3306,
-      waitForConnections: true,
-      connectionLimit: 10,
-      queueLimit: 0
+      ...poolOptions
     });
 
 // Helper function to test DB connection when backend starts
@@ -55,10 +62,56 @@ async function testDbConnection() {
       console.warn('⚠️ Table do_operators verification skipped:', tblErr.message);
     }
 
-    // Auto migration: ensure sub_admins table and profile / access scope columns exist
+    // Auto migration: rename sub_admins → customers (legacy) and verify customers schema
     try {
+      const [tables] = await pool.query(
+        `SELECT TABLE_NAME AS name FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('sub_admins', 'customers')`
+      );
+      const names = new Set(tables.map((t) => t.name));
+      if (names.has('sub_admins') && !names.has('customers')) {
+        await pool.query('RENAME TABLE sub_admins TO customers');
+        console.log('🌱 Renamed table sub_admins → customers.');
+        names.delete('sub_admins');
+        names.add('customers');
+      }
+
+      // Both tables exist: merge sub_admins → customers, then drop legacy table
+      if (names.has('sub_admins') && names.has('customers')) {
+        const candidateCols = [
+          'id',
+          'email',
+          'password',
+          'full_name',
+          'phone_no',
+          'allowed_clients',
+          'allowed_warehouses',
+          'created_at',
+          'updated_at'
+        ];
+        const [custCols] = await pool.query('SHOW COLUMNS FROM customers');
+        const [subCols] = await pool.query('SHOW COLUMNS FROM sub_admins');
+        const custSet = new Set(custCols.map((c) => c.Field));
+        const subSet = new Set(subCols.map((c) => c.Field));
+        const shared = candidateCols.filter((c) => custSet.has(c) && subSet.has(c));
+        if (shared.length > 0) {
+          const colList = shared.map((c) => `\`${c}\``).join(', ');
+          const [ins] = await pool.query(
+            `INSERT IGNORE INTO customers (${colList}) SELECT ${colList} FROM sub_admins`
+          );
+          console.log(
+            `🌱 Merged sub_admins → customers (${shared.join(', ')}); inserted ${ins?.affectedRows ?? 0} row(s).`
+          );
+        } else {
+          console.warn('⚠️ sub_admins → customers merge skipped: no common columns.');
+        }
+        await pool.query('DROP TABLE sub_admins');
+        console.log('🌱 Dropped legacy table sub_admins.');
+        names.delete('sub_admins');
+      }
+
       await pool.query(`
-        CREATE TABLE IF NOT EXISTS sub_admins (
+        CREATE TABLE IF NOT EXISTS customers (
           id INT AUTO_INCREMENT PRIMARY KEY,
           email VARCHAR(150) NOT NULL UNIQUE,
           password VARCHAR(255) NOT NULL,
@@ -71,32 +124,50 @@ async function testDbConnection() {
         )
       `);
 
-      const [subColumns] = await pool.query('SHOW COLUMNS FROM sub_admins');
+      const [subColumns] = await pool.query('SHOW COLUMNS FROM customers');
       const subColNames = subColumns.map(c => c.Field);
 
       if (!subColNames.includes('full_name')) {
-        await pool.query('ALTER TABLE sub_admins ADD COLUMN full_name VARCHAR(150) DEFAULT NULL');
-        console.log('🌱 Added column full_name to sub_admins.');
+        await pool.query('ALTER TABLE customers ADD COLUMN full_name VARCHAR(150) DEFAULT NULL');
+        console.log('🌱 Added column full_name to customers.');
       }
       if (!subColNames.includes('phone_no')) {
-        await pool.query('ALTER TABLE sub_admins ADD COLUMN phone_no VARCHAR(20) DEFAULT NULL');
-        console.log('🌱 Added column phone_no to sub_admins.');
+        await pool.query('ALTER TABLE customers ADD COLUMN phone_no VARCHAR(20) DEFAULT NULL');
+        console.log('🌱 Added column phone_no to customers.');
       }
       if (!subColNames.includes('allowed_clients')) {
-        await pool.query('ALTER TABLE sub_admins ADD COLUMN allowed_clients TEXT DEFAULT NULL');
-        console.log('🌱 Added column allowed_clients to sub_admins.');
+        await pool.query('ALTER TABLE customers ADD COLUMN allowed_clients TEXT DEFAULT NULL');
+        console.log('🌱 Added column allowed_clients to customers.');
       }
       if (!subColNames.includes('allowed_warehouses')) {
-        await pool.query('ALTER TABLE sub_admins ADD COLUMN allowed_warehouses TEXT DEFAULT NULL');
-        console.log('🌱 Added column allowed_warehouses to sub_admins.');
+        await pool.query('ALTER TABLE customers ADD COLUMN allowed_warehouses TEXT DEFAULT NULL');
+        console.log('🌱 Added column allowed_warehouses to customers.');
       }
       if (!subColNames.includes('updated_at')) {
-        await pool.query('ALTER TABLE sub_admins ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL');
-        console.log('🌱 Added column updated_at to sub_admins.');
+        await pool.query('ALTER TABLE customers ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL');
+        console.log('🌱 Added column updated_at to customers.');
       }
-      console.log('🌱 Verified sub_admins table schema.');
+
+      try {
+        const [ls] = await pool.query(
+          `SELECT TABLE_NAME AS name FROM information_schema.TABLES
+           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'login_security' LIMIT 1`
+        );
+        if (ls.length > 0) {
+          const [upd] = await pool.query(
+            "UPDATE login_security SET role = 'customer' WHERE role = 'sub_admin'"
+          );
+          if (upd?.affectedRows > 0) {
+            console.log(`🌱 Updated login_security role sub_admin → customer (${upd.affectedRows} row(s)).`);
+          }
+        }
+      } catch (lsErr) {
+        console.warn('⚠️ login_security role backfill skipped:', lsErr.message);
+      }
+
+      console.log('🌱 Verified customers table schema.');
     } catch (subErr) {
-      console.warn('⚠️ Table sub_admins verification skipped:', subErr.message);
+      console.warn('⚠️ Table customers verification skipped:', subErr.message);
     }
 
     // Auto migration: create daily_temp_logs table if not exists

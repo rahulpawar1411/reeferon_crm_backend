@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
-const { parsePagination, sendPaginated, appendWarehouseFilter } = require('../utils/pagination');
+const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAccessScope } = require('../utils/pagination');
 const { handleControllerError } = require('../utils/errorHandler');
 
 // Helper to format date
@@ -37,25 +37,11 @@ exports.getInwardLogs = async (req, res) => {
       params.push(req.user.warehouse_name);
     }
 
-    // Sub-Admin scoped filtering by allowed clients & warehouses
-    if (req.user && req.user.role === 'sub_admin') {
-      if (req.user.allowed_clients) {
-        const clients = req.user.allowed_clients.split(',').map(c => c.trim()).filter(Boolean);
-        if (clients.length > 0) {
-          const placeholders = clients.map(() => '?').join(', ');
-          conditions.push(`inward_client_name IN (${placeholders})`);
-          params.push(...clients);
-        }
-      }
-      if (req.user.allowed_warehouses) {
-        const warehouses = req.user.allowed_warehouses.split(',').map(w => w.trim()).filter(Boolean);
-        if (warehouses.length > 0) {
-          const placeholders = warehouses.map(() => '?').join(', ');
-          conditions.push(`(warehouse_name IN (${placeholders}) OR warehouse_name IS NULL)`);
-          params.push(...warehouses);
-        }
-      }
-    }
+    // Customer scoped filtering by allowed clients & warehouses
+    appendSubAdminAccessScope(conditions, params, req.user, {
+      clientColumn: 'inward_client_name',
+      warehouseColumn: 'warehouse_name'
+    });
 
     if (search) {
       conditions.push('(reference_no LIKE ? OR inward_vehicle_no LIKE ? OR inward_client_name LIKE ? OR inward_transporter_name LIKE ? OR inward_driver_name LIKE ? OR operator_email LIKE ?)');
@@ -593,7 +579,7 @@ exports.updateInwardLog = async (req, res) => {
 
     await db.query(query, values);
     
-    // Log Operator Activity (includes Super Admin / Sub Admin / DO updates)
+    // Log Operator Activity (includes Super Admin / Customer / DO updates)
     const refNo = current.reference_no || `RF-IN-26-${String(id).padStart(4, '0')}`;
     const vehicleNo = data.inward_vehicle_no || current.inward_vehicle_no || '-';
     await logActivity(

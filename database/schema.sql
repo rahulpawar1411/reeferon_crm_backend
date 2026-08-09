@@ -103,8 +103,8 @@ CREATE TABLE IF NOT EXISTS inward_temp_logs (
     inward_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
--- 5. Sub-Admins (restricted admin access by client / warehouse)
-CREATE TABLE IF NOT EXISTS sub_admins (
+-- 5. Customers (restricted access by client / warehouse; formerly sub_admins)
+CREATE TABLE IF NOT EXISTS customers (
     id INT AUTO_INCREMENT PRIMARY KEY,
     email VARCHAR(150) NOT NULL UNIQUE,
     password VARCHAR(255) NOT NULL,
