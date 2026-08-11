@@ -505,13 +505,10 @@ exports.updateChamberLog = async (req, res) => {
 // DELETE record
 exports.deleteChamberLog = async (req, res) => {
   const { id } = req.params;
-  const remarks = (req.body.remarks || req.query.remarks || '').trim();
+  let remarks = (req.body.remarks || req.query.remarks || '').trim();
 
   if (!remarks) {
-    return res.status(400).json({
-      success: false,
-      message: 'Remarks are required to delete this log.'
-    });
+    remarks = 'Deleted by Super Admin';
   }
 
   try {
