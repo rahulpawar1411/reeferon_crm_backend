@@ -9,7 +9,9 @@
     "dev": "node server.js",
     "db:update": "node database/update_db.js",
     "db:clear-keep-super-admin": "node database/clearKeepSuperAdmin.js",
-    "db:migrate-sub-admins": "node database/migrate_sub_admins.js"
+    "db:migrate-sub-admins": "node database/migrate_sub_admins.js",
+    "logs:archive": "node scripts/archive-error-logs.js",
+    "db:backup": "node scripts/backup-db.js"
   },
   "keywords": [
     "crm",
@@ -21,6 +23,7 @@
   "license": "ISC",
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "cloudinary": "^2.2.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -30,6 +33,7 @@
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
+    "multer-storage-cloudinary": "^4.0.0",
     "mysql2": "^3.9.7",
     "nodemailer": "^6.10.1"
   },

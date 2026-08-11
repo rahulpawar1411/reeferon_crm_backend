@@ -190,7 +190,10 @@ exports.createActivityLog = async (req, res) => {
       remark: resolvedRemark
     });
   } catch (error) {
-    console.error('Failed to create activity log:', error);
-    return res.status(500).json({ success: false, message: 'Failed to record activity log.', error: error.message });
+    return handleControllerError(res, error, {
+      checkpoint: 'createActivityLog',
+      req,
+      clientMessage: 'Failed to record activity log.'
+    });
   }
 };

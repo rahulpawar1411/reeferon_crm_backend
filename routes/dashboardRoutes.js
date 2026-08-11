@@ -22,4 +22,7 @@ router.get('/inventory-reconciliation', dashboardController.getInventoryReconcil
 // GET /api/dashboard/daily-inventory-deltas - Fetch daily inventory box comparisons (deltas)
 router.get('/daily-inventory-deltas', dashboardController.getDailyInventoryDeltas);
 
+// GET /api/dashboard/do-task-overview - Warehouse-wise DO completed / pending / overdue
+router.get('/do-task-overview', dashboardController.getDoTaskOverview);
+
 module.exports = router;

@@ -23,7 +23,10 @@ exports.getActorLabel = async (user) => {
   if (user.role === 'super_admin') {
     return name ? `Super Admin ${name} (${user.email})` : `Super Admin (${user.email})`;
   }
-  if (user.role === 'customer' || user.role === 'sub_admin') {
+  if (user.role === 'sub_admin') {
+    return name ? `Sub-Admin ${name} (${user.email})` : `Sub-Admin (${user.email})`;
+  }
+  if (user.role === 'customer') {
     return name ? `Customer ${name} (${user.email})` : `Customer (${user.email})`;
   }
   if (user.role === 'do_operator') {

@@ -1,12 +1,15 @@
 // ====================================================================
 // Authentication Controller (backend/controllers/authController.js)
-// Implements secure Login, Logout, Profile verification, and Bcrypt validation.
-// Login lockout: 5 failed attempts within 1 hour → 30 minute lock per email/role account.
+// --------------------------------------------------------------------
+// Login / logout / profile. JWT signed with getJwtSecret() from .env only.
+// Lockout: 5 failed attempts within 1 hour → 30 min lock (loginSecurity.js).
+// Errors: respondAuthServerError / checkpoints — do not leak SQL to clients.
 // ====================================================================
 
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { getJwtSecret } = require('../utils/jwtSecret');
 const { logActivity } = require('../utils/logger');
 const { logErrorCheckpoint } = require('../utils/errorHandler');
 const {
@@ -44,9 +47,9 @@ const getTableForRole = (role) => {
   switch (role) {
     case 'super_admin':
       return 'super_admin';
+    case 'sub_admin':
+      return 'sub_admins';
     case 'customer':
-      return 'customers';
-    case 'sub_admin': // legacy alias → same table after rename
       return 'customers';
     case 'do_operator':
       return 'do_operators';
@@ -55,17 +58,9 @@ const getTableForRole = (role) => {
   }
 };
 
-/** SELECT from customers, with legacy sub_admins fallback if rename not applied yet. */
+/** SELECT from customers table (scoped portal accounts). */
 async function queryCustomers(sqlWithCustomers, params = []) {
-  try {
-    return await db.query(sqlWithCustomers, params);
-  } catch (err) {
-    if (err.code === 'ER_NO_SUCH_TABLE' && /customers/i.test(sqlWithCustomers)) {
-      const legacySql = sqlWithCustomers.replace(/\bcustomers\b/gi, 'sub_admins');
-      return await db.query(legacySql, params);
-    }
-    throw err;
-  }
+  return db.query(sqlWithCustomers, params);
 }
 
 function lockedResponse(lockInfo) {
@@ -99,14 +94,19 @@ exports.login = async (req, res) => {
     const cleanEmail = email.trim().toLowerCase();
 
     // 1b. Temporary lockout check (all roles: super_admin / customer / do_operator)
-    const lockState = await checkLoginLock(cleanEmail);
+    let lockState = { locked: false };
+    try {
+      lockState = await checkLoginLock(cleanEmail);
+    } catch (lockErr) {
+      console.warn('⚠️ checkLoginLock skipped:', lockErr.message);
+    }
     if (lockState.locked) {
-      await logActivity(
+      logActivity(
         cleanEmail,
         'LOGIN_BLOCKED',
         'SECURITY',
         `Login blocked — account locked for ${lockState.minutesLeft} more minute(s)`
-      );
+      ).catch(() => {});
       return res.status(429).json(lockedResponse(lockState));
     }
 
@@ -119,13 +119,32 @@ exports.login = async (req, res) => {
       user = superRows[0];
       resolvedRole = 'super_admin';
     } else {
-      // B. Check in customers table (legacy: sub_admins)
-      const [subRows] = await queryCustomers('SELECT * FROM customers WHERE email = ? LIMIT 1', [cleanEmail]);
-      if (subRows.length > 0) {
-        user = subRows[0];
-        resolvedRole = 'customer';
-      } else {
-        // C. Check in do_operators table
+      // B. Mobile Sub-Admin (full app access)
+      try {
+        const [subAdminRows] = await db.query('SELECT * FROM sub_admins WHERE email = ? LIMIT 1', [cleanEmail]);
+        if (subAdminRows.length > 0) {
+          user = subAdminRows[0];
+          resolvedRole = 'sub_admin';
+        }
+      } catch (subErr) {
+        if (subErr.code !== 'ER_NO_SUCH_TABLE') throw subErr;
+      }
+
+      if (!user) {
+        // C. Customer (scoped portal)
+        try {
+          const [custRows] = await queryCustomers('SELECT * FROM customers WHERE email = ? LIMIT 1', [cleanEmail]);
+          if (custRows.length > 0) {
+            user = custRows[0];
+            resolvedRole = 'customer';
+          }
+        } catch (custErr) {
+          if (custErr.code !== 'ER_NO_SUCH_TABLE') throw custErr;
+        }
+      }
+
+      if (!user) {
+        // D. Data Operator
         const [doRows] = await db.query('SELECT * FROM do_operators WHERE email = ? LIMIT 1', [cleanEmail]);
         if (doRows.length > 0) {
           user = doRows[0];
@@ -187,7 +206,11 @@ exports.login = async (req, res) => {
     }
 
     // 4. Success — clear failed attempts (no lock if under 5 fails)
-    await clearLoginSecurity(cleanEmail);
+    try {
+      await clearLoginSecurity(cleanEmail);
+    } catch (secErr) {
+      console.warn('⚠️ clearLoginSecurity skipped:', secErr.message);
+    }
 
     // 5. Generate JSON Web Token (JWT)
     const tokenPayload = {
@@ -204,7 +227,7 @@ exports.login = async (req, res) => {
 
     const token = jwt.sign(
       tokenPayload,
-      process.env.JWT_SECRET || 'ReeferON_SuperSecured_JWT_Secret_Token_Key_2026',
+      getJwtSecret(),
       { expiresIn: '24h' }
     );
 
@@ -223,7 +246,8 @@ exports.login = async (req, res) => {
       resolvedRole === 'do_operator' && loginName
         ? `DO Operator ${loginName} (${cleanEmail})`
         : `${resolvedRole} (${cleanEmail})`;
-    await logActivity(cleanEmail, 'LOGIN', 'SECURITY', `Authenticated successfully as ${loginWho}`);
+    // Do not block login response if activity log is slow / pool busy
+    logActivity(cleanEmail, 'LOGIN', 'SECURITY', `Authenticated successfully as ${loginWho}`).catch(() => {});
 
     return res.status(200).json({
       success: true,
@@ -467,7 +491,7 @@ exports.changeSuperAdminPassword = async (req, res) => {
 
     const token = jwt.sign(
       tokenPayload,
-      process.env.JWT_SECRET || 'ReeferON_SuperSecured_JWT_Secret_Token_Key_2026',
+      getJwtSecret(),
       { expiresIn: '24h' }
     );
 

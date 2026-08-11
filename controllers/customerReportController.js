@@ -36,20 +36,17 @@ async function loadCustomerIdentity(email) {
 /** POST / — Customer creates a report */
 exports.createCustomerReport = async (req, res) => {
   try {
-    const role = req.user?.role === 'sub_admin' ? 'customer' : req.user?.role;
+    const role = req.user?.role;
     if (role !== 'customer' && role !== 'super_admin') {
       return res.status(403).json({ error: 'Only customers can submit reports.' });
     }
 
-    const reference_no = String(req.body.reference_no || '').trim();
+    const reference_no = String(req.body.reference_no || '').trim() || 'Query';
     const message = String(req.body.message || '').trim();
     const email = (req.user?.email || '').trim().toLowerCase() || 'unknown';
 
-    if (!reference_no) {
-      return res.status(400).json({ error: 'Please enter the Reference No. of the log.' });
-    }
     if (!message) {
-      return res.status(400).json({ error: 'Please type your issue in the message box.' });
+      return res.status(400).json({ error: 'Please type your query message.' });
     }
     if (message.length > 4000) {
       return res.status(400).json({ error: 'Issue message is too long (max 4000 characters).' });
@@ -88,7 +85,7 @@ exports.createCustomerReport = async (req, res) => {
     return res.status(201).json({
       success: true,
       id: result.insertId,
-      message: 'Your report has been submitted. Our team will review it.'
+      message: 'Your query has been submitted. Our team will review it.'
     });
   } catch (err) {
     return handleControllerError(res, err, {
@@ -237,6 +234,41 @@ exports.updateCustomerReportStatus = async (req, res) => {
       checkpoint: 'updateCustomerReportStatus',
       req,
       clientMessage: 'Failed to update report status.'
+    });
+  }
+};
+
+/** DELETE /:id — Super Admin deletes a customer report */
+exports.deleteCustomerReport = async (req, res) => {
+  try {
+    if (req.user?.role !== 'super_admin') {
+      return res.status(403).json({ error: 'Only Super Admin can delete customer reports.' });
+    }
+
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid report id.' });
+    }
+
+    const [result] = await db.query('DELETE FROM customer_reports WHERE id = ?', [id]);
+    if (!result.affectedRows) {
+      return res.status(404).json({ error: 'Report not found.' });
+    }
+
+    const reviewer = req.user?.email || 'super_admin';
+    await logActivity(
+      reviewer,
+      'CUSTOMER_REPORT_DELETE',
+      'SYSTEM',
+      `Super Admin deleted customer report #${id}`
+    );
+
+    return res.json({ success: true, message: 'Report deleted.' });
+  } catch (err) {
+    return handleControllerError(res, err, {
+      checkpoint: 'deleteCustomerReport',
+      req,
+      clientMessage: 'Failed to delete report.'
     });
   }
 };

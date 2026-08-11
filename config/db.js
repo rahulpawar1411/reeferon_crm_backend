@@ -12,13 +12,30 @@ dotenv.config();
 // Create a connection pool (Reuses DB connections automatically)
 // Supports connection string (DATABASE_URL) or individual parameters
 // timezone +05:30 so "today" matches India (customer/DO local date)
+// FreeSQL free tier allows very few concurrent connections — keep pool tiny there.
+const dbHostHint = String(
+  process.env.DATABASE_URL || process.env.DB_HOST || 'localhost'
+).toLowerCase();
+const isFreeSqlHost =
+  dbHostHint.includes('freesqldatabase') || dbHostHint.includes('sql12.freesqldatabase');
+
 const poolOptions = {
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
+  // FreeSQL free tier often allows only 1–2 connections total across ALL clients
+  connectionLimit: Number(process.env.DB_POOL_LIMIT) || (isFreeSqlHost ? 1 : 8),
+  queueLimit: 50,
+  connectTimeout: 15000,
+  maxIdle: isFreeSqlHost ? 1 : 4,
+  idleTimeout: 20000,
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000,
   timezone: '+05:30',
   dateStrings: true
 };
+
+console.log(
+  `🗄️ MySQL pool limit=${poolOptions.connectionLimit}${isFreeSqlHost ? ' (FreeSQL safe)' : ''}`
+);
 
 const pool = process.env.DATABASE_URL
   ? mysql.createPool({ uri: process.env.DATABASE_URL, ...poolOptions })
@@ -31,11 +48,18 @@ const pool = process.env.DATABASE_URL
       ...poolOptions
     });
 
+// Ensure connections are released even if callers forget (pool.query already does)
+pool.on('connection', (connection) => {
+  // pool 'connection' event gives the raw (non-promise) connection
+  connection.query("SET time_zone = '+05:30'", () => {});
+});
+
 // Helper function to test DB connection when backend starts
 async function testDbConnection() {
   try {
-    const connection = await pool.getConnection();
-    console.log('✅ Connected to MySQL Database:', process.env.DB_NAME || 'reeferon_crm_db');
+    // Use pool.query only (no held getConnection) so FreeSQL connection slots stay free
+    await pool.query('SELECT 1');
+    console.log('✅ Connected to MySQL Database:', process.env.DB_NAME || (isFreeSqlHost ? 'FreeSQL' : 'reeferon_crm_db'));
     
     // Auto migration: add columns to do_operators table if they don't exist
     try {
@@ -62,32 +86,33 @@ async function testDbConnection() {
       console.warn('⚠️ Table do_operators verification skipped:', tblErr.message);
     }
 
-    // Auto migration: rename sub_admins → customers (legacy) and verify customers schema
+    // Auto migration: legacy scoped accounts live in `customers`.
+    // New mobile full-access Sub-Admins use a separate `sub_admins` table.
     try {
       const [tables] = await pool.query(
         `SELECT TABLE_NAME AS name FROM information_schema.TABLES
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('sub_admins', 'customers')`
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('sub_admins', 'customers', 'app_sub_admins')`
       );
       const names = new Set(tables.map((t) => t.name));
-      if (names.has('sub_admins') && !names.has('customers')) {
+
+      const subAdminsIsLegacyScoped = async () => {
+        if (!names.has('sub_admins')) return false;
+        const [cols] = await pool.query('SHOW COLUMNS FROM sub_admins');
+        return cols.some((c) => c.Field === 'allowed_clients');
+      };
+
+      // Only rename/merge when old scoped sub_admins still exists
+      if (names.has('sub_admins') && !names.has('customers') && (await subAdminsIsLegacyScoped())) {
         await pool.query('RENAME TABLE sub_admins TO customers');
-        console.log('🌱 Renamed table sub_admins → customers.');
+        console.log('🌱 Renamed legacy scoped sub_admins → customers.');
         names.delete('sub_admins');
         names.add('customers');
       }
 
-      // Both tables exist: merge sub_admins → customers, then drop legacy table
-      if (names.has('sub_admins') && names.has('customers')) {
+      if (names.has('sub_admins') && names.has('customers') && (await subAdminsIsLegacyScoped())) {
         const candidateCols = [
-          'id',
-          'email',
-          'password',
-          'full_name',
-          'phone_no',
-          'allowed_clients',
-          'allowed_warehouses',
-          'created_at',
-          'updated_at'
+          'id', 'email', 'password', 'full_name', 'phone_no',
+          'allowed_clients', 'allowed_warehouses', 'created_at', 'updated_at'
         ];
         const [custCols] = await pool.query('SHOW COLUMNS FROM customers');
         const [subCols] = await pool.query('SHOW COLUMNS FROM sub_admins');
@@ -100,13 +125,11 @@ async function testDbConnection() {
             `INSERT IGNORE INTO customers (${colList}) SELECT ${colList} FROM sub_admins`
           );
           console.log(
-            `🌱 Merged sub_admins → customers (${shared.join(', ')}); inserted ${ins?.affectedRows ?? 0} row(s).`
+            `🌱 Merged legacy sub_admins → customers; inserted ${ins?.affectedRows ?? 0} row(s).`
           );
-        } else {
-          console.warn('⚠️ sub_admins → customers merge skipped: no common columns.');
         }
         await pool.query('DROP TABLE sub_admins');
-        console.log('🌱 Dropped legacy table sub_admins.');
+        console.log('🌱 Dropped legacy scoped sub_admins.');
         names.delete('sub_admins');
       }
 
@@ -148,26 +171,45 @@ async function testDbConnection() {
         console.log('🌱 Added column updated_at to customers.');
       }
 
-      try {
-        const [ls] = await pool.query(
-          `SELECT TABLE_NAME AS name FROM information_schema.TABLES
-           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'login_security' LIMIT 1`
-        );
-        if (ls.length > 0) {
-          const [upd] = await pool.query(
-            "UPDATE login_security SET role = 'customer' WHERE role = 'sub_admin'"
-          );
-          if (upd?.affectedRows > 0) {
-            console.log(`🌱 Updated login_security role sub_admin → customer (${upd.affectedRows} row(s)).`);
-          }
-        }
-      } catch (lsErr) {
-        console.warn('⚠️ login_security role backfill skipped:', lsErr.message);
-      }
-
       console.log('🌱 Verified customers table schema.');
     } catch (subErr) {
       console.warn('⚠️ Table customers verification skipped:', subErr.message);
+    }
+
+    // Mobile Sub-Admins — dedicated table (NOT customers)
+    try {
+      const [saTables] = await pool.query(
+        `SELECT TABLE_NAME AS name FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('sub_admins', 'app_sub_admins')`
+      );
+      const saNames = new Set(saTables.map((t) => t.name));
+
+      if (saNames.has('app_sub_admins') && !saNames.has('sub_admins')) {
+        await pool.query('RENAME TABLE app_sub_admins TO sub_admins');
+        console.log('🌱 Renamed app_sub_admins → sub_admins.');
+      } else if (saNames.has('app_sub_admins') && saNames.has('sub_admins')) {
+        await pool.query(`
+          INSERT IGNORE INTO sub_admins (id, email, password, full_name, phone_no, created_at, updated_at)
+          SELECT id, email, password, full_name, phone_no, created_at, updated_at FROM app_sub_admins
+        `);
+        await pool.query('DROP TABLE app_sub_admins');
+        console.log('🌱 Merged app_sub_admins into sub_admins and dropped app_sub_admins.');
+      }
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS sub_admins (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          email VARCHAR(150) NOT NULL UNIQUE,
+          password VARCHAR(255) NOT NULL,
+          full_name VARCHAR(150) DEFAULT NULL,
+          phone_no VARCHAR(20) DEFAULT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NULL DEFAULT NULL
+        )
+      `);
+      console.log('🌱 Verified sub_admins table (mobile full-access, separate from customers).');
+    } catch (saErr) {
+      console.warn('⚠️ Table sub_admins verification skipped:', saErr.message);
     }
 
     // Auto migration: create daily_temp_logs table if not exists
@@ -405,6 +447,29 @@ async function testDbConnection() {
       console.log('🌱 Verified customer_reports table is online.');
     } catch (reportErr) {
       console.warn('⚠️ Table customer_reports creation failed:', reportErr.message);
+    }
+
+    // Auto migration: Super Admin ↔ Customer notes / chat updates
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS customer_admin_notes (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          customer_id INT DEFAULT NULL,
+          customer_email VARCHAR(150) NOT NULL,
+          customer_name VARCHAR(150) DEFAULT NULL,
+          author_role VARCHAR(50) NOT NULL,
+          author_email VARCHAR(150) NOT NULL,
+          author_name VARCHAR(150) DEFAULT NULL,
+          message TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_can_email (customer_email),
+          INDEX idx_can_customer_id (customer_id),
+          INDEX idx_can_created (created_at)
+        )
+      `);
+      console.log('🌱 Verified customer_admin_notes table is online.');
+    } catch (notesErr) {
+      console.warn('⚠️ Table customer_admin_notes creation failed:', notesErr.message);
     }
 
     // Auto migration: create daily_chamber_temp_logs table if not exists
@@ -669,13 +734,29 @@ async function testDbConnection() {
     } catch (logErr) {
       console.warn('⚠️ Failed to write server startup log:', logErr.message);
     }
-
-    connection.release(); // Release connection back to pool
   } catch (error) {
     console.warn('⚠️ Warning: MySQL database connection failed:', error.message);
-    console.warn('💡 Tip: Ensure MySQL is running on port 3306 and reeferon_crm_db exists.');
+    console.warn('💡 Tip: FreeSQL max connections exceeded? Restart backend once and wait ~30s, or switch DB_HOST to localhost.');
+    pool._dbConnected = false;
+    pool._dbLastError = error.message;
   }
 }
+
+/** Quick health probe for /api/health (no migrations). */
+async function getDbHealth() {
+  try {
+    await pool.query('SELECT 1');
+    pool._dbConnected = true;
+    pool._dbLastError = null;
+    return { connected: true };
+  } catch (error) {
+    pool._dbConnected = false;
+    pool._dbLastError = error.message;
+    return { connected: false, error: error.message };
+  }
+}
+
+pool.getDbHealth = getDbHealth;
 
 // Run connection check once when file is required
 testDbConnection();

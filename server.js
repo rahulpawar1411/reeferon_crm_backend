@@ -39,7 +39,13 @@ if (process.env.FRONTEND_URL) {
 }
 
 app.use(cors({
-  origin: allowedOrigins,
+  origin: (origin, callback) => {
+    // Allow non-browser / same-origin / Vite LAN hosts during local dev
+    if (!origin || allowedOrigins.includes(origin) || /^http:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$/.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(null, false);
+  },
   credentials: true
 }));
 
@@ -59,28 +65,44 @@ app.use((req, res, next) => {
   next();
 });
 
-// Response Interceptor Middleware to log system/database errors to the DB automatically
+// Log failed HTTP responses to backend/logs (error.log + daily file)
+// 5xx → logErrorCheckpoint (file + DB). 4xx (except 401/403) → file only.
 app.use((req, res, next) => {
   const originalJson = res.json;
 
   res.json = function (body) {
-    if (res.statusCode >= 500 && !(res.locals && res.locals.errorCheckpointLogged)) {
-      const { logErrorCheckpoint } = require('./utils/errorHandler');
-      const errMsg = body?.error || body?.message || JSON.stringify(body) || 'Unknown error';
-      const synthetic = new Error(typeof errMsg === 'string' ? errMsg : 'Unknown server error');
-      synthetic.name = body?.checkpoint?.type || 'HttpError';
-      synthetic.statusCode = res.statusCode;
-      logErrorCheckpoint(synthetic, {
-        checkpoint: body?.checkpoint?.checkpoint || 'httpResponseInterceptor',
-        statusCode: res.statusCode,
-        method: req.method,
-        url: req.originalUrl,
-        email: req.user?.email || 'system',
-        file: body?.checkpoint?.file || null,
-        line: body?.checkpoint?.line || null
-      }).catch((err) => {
-        errorLine('Failed to log error response checkpoint:', err?.message || err);
-      });
+    try {
+      const code = res.statusCode;
+      const alreadyLogged = res.locals && res.locals.errorCheckpointLogged;
+
+      if (!alreadyLogged && code >= 500) {
+        const { logErrorCheckpoint } = require('./utils/errorHandler');
+        const errMsg = body?.error || body?.message || 'Unknown server error';
+        const synthetic = new Error(typeof errMsg === 'string' ? errMsg : 'Unknown server error');
+        synthetic.name = body?.checkpoint?.type || 'HttpError';
+        synthetic.statusCode = code;
+        res.locals = res.locals || {};
+        res.locals.errorCheckpointLogged = true;
+        logErrorCheckpoint(synthetic, {
+          checkpoint: body?.checkpoint?.checkpoint || 'httpResponseInterceptor',
+          statusCode: code,
+          method: req.method,
+          url: req.originalUrl,
+          email: req.user?.email || 'system',
+          file: body?.checkpoint?.file || null,
+          line: body?.checkpoint?.line || null
+        }).catch((err) => {
+          errorLine('Failed to log error response checkpoint:', err?.message || err);
+        });
+      } else if (!alreadyLogged && code >= 400 && code !== 401 && code !== 403) {
+        // Client/business failures (validation, conflicts, not found, etc.)
+        const { writeHttpFailure } = require('./utils/errorFileLogger');
+        writeHttpFailure(req, code, body || {}, {
+          process: body?.checkpoint?.checkpoint || 'httpResponseInterceptor'
+        });
+      }
+    } catch (interceptErr) {
+      errorLine('Error file logger interceptor failed:', interceptErr?.message || interceptErr);
     }
     return originalJson.apply(this, arguments);
   };
@@ -98,6 +120,17 @@ const loginRateLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false
+});
+
+// Redirect static requests for Cloudinary URLs if the client prepended /
+app.use((req, res, next) => {
+  const match = req.originalUrl.match(/^\/+(https?:\/+.+)$/i);
+  if (match) {
+    let targetUrl = match[1];
+    targetUrl = targetUrl.replace(/^(https?):\/+/, '$1://');
+    return res.redirect(targetUrl);
+  }
+  next();
 });
 
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
@@ -121,17 +154,17 @@ const chamberRoutes = require('./routes/chamberRoutes');
 app.use('/api/auth/login', loginRateLimiter);
 app.use('/api/auth', authRoutes);
 
-app.use('/api/chambers', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), chamberRoutes);
-app.use('/api/leads', verifyToken, requireRole(['super_admin', 'customer']), leadRoutes);
-app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'customer']), dashboardRoutes);
-app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), tempRoutes);
-app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), chamberTempRoutes);
-app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), inwardRoutes);
-app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), outwardRoutes);
+app.use('/api/chambers', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberRoutes);
+app.use('/api/leads', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin']), leadRoutes);
+app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin', 'do_operator']), dashboardRoutes);
+app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), tempRoutes);
+app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberTempRoutes);
+app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), inwardRoutes);
+app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), outwardRoutes);
 app.use('/api/do-operators', verifyToken, requireRole(['super_admin']), operatorRoutes);
 app.use('/api/customers', verifyToken, requireRole(['super_admin']), subAdminRoutes);
-app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), subAdminRoutes); // legacy alias
-app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator']), activityRoutes);
+app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), require('./routes/appSubAdminRoutes'));
+app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), activityRoutes);
 app.use('/api/permission-requests', permissionRoutes);
 app.use(
   '/api/customer-reports',
@@ -139,14 +172,40 @@ app.use(
   requireRole(['customer', 'super_admin']),
   require('./routes/customerReportRoutes')
 );
+app.use(
+  '/api/customer-notes',
+  verifyToken,
+  requireRole(['customer', 'super_admin']),
+  require('./routes/customerAdminNotesRoutes')
+);
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'Online', message: 'ReeferON CRM API Backend running smoothly.' });
+app.get('/api/health', async (req, res) => {
+  const db = require('./config/db');
+  const dbHealth = await db.getDbHealth();
+  const ok = dbHealth.connected;
+  const uptimeSeconds = Math.floor(process.uptime());
+
+  return res.status(ok ? 200 : 503).json({
+    success: ok,
+    message: ok ? 'ReeferON CRM API running smoothly.' : 'API up but database unavailable.',
+    data: {
+      status: ok ? 'Online' : 'Degraded',
+      database: ok ? 'connected' : 'disconnected',
+      databaseError: dbHealth.error || null,
+      uptimeSeconds,
+      timestamp: new Date().toISOString(),
+      version: process.env.npm_package_version || '1.0.0'
+    }
+  });
 });
 
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) {
-    return res.status(404).json({ error: 'API route not found' });
+    return res.status(404).json({
+      success: false,
+      message: 'API route not found',
+      error: 'API route not found'
+    });
   }
   
   const frontendPath = path.join(__dirname, '../frontend/dist/index.html');
@@ -162,6 +221,49 @@ app.get('*', (req, res) => {
 
 app.use(require('./utils/errorHandler').globalErrorMiddleware);
 
-app.listen(PORT, () => {
-  serverRunning(PORT);
+// ------------------------------------------------------------------
+// Process-level failures + log housekeeping on startup
+// ------------------------------------------------------------------
+const { ensureLogsDir, writeFailedProcess } = require('./utils/errorFileLogger');
+const { archiveLegacyLogs } = require('./scripts/archive-error-logs');
+ensureLogsDir();
+try {
+  const { moved } = archiveLegacyLogs();
+  if (moved > 0) console.log(`📁 Archived ${moved} legacy text log file(s) → logs/archive/`);
+} catch (archiveErr) {
+  errorLine('Log archive skipped:', archiveErr?.message || archiveErr);
+}
+
+process.on('uncaughtException', (err) => {
+  writeFailedProcess('uncaughtException', err, { status: 500 });
+  errorLine('uncaughtException:', err?.message || err);
 });
+
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  writeFailedProcess('unhandledRejection', err, { status: 500 });
+  errorLine('unhandledRejection:', err?.message || err);
+});
+
+const db = require('./config/db');
+let httpServer;
+
+httpServer = app.listen(PORT, async () => {
+  serverRunning(PORT);
+  const health = await db.getDbHealth();
+  if (!health.connected) {
+    errorLine('Database not connected at startup:', health.error || 'unknown');
+  }
+});
+
+/** Graceful shutdown — finish in-flight requests before exit. */
+function gracefulShutdown(signal) {
+  errorLine(`${signal} received — shutting down…`);
+  httpServer.close(() => {
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10000).unref();
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));

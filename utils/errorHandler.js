@@ -4,7 +4,6 @@
 // Persists ERROR rows into do_operator_activities for Super Admin logs.
 // ====================================================================
 
-const fs = require('fs');
 const path = require('path');
 const { logActivity } = require('./logger');
 
@@ -119,56 +118,59 @@ function formatCheckpointDescription(cp) {
 }
 
 /**
- * Append error details and stack trace to backend/logs/error.log
+ * Append structured error to backend/logs/error.log + daily errors-YYYY-MM-DD.log
+ * Fields: DATE, TIME, STATUS, FILE, PROCESS, METHOD, URL, MESSAGE, STACK
  */
 function logToFile(cp, err) {
   try {
-    const logsDir = path.join(__dirname, '..', 'logs');
-    if (!fs.existsSync(logsDir)) {
-      fs.mkdirSync(logsDir, { recursive: true });
-    }
-    const logFilePath = path.join(logsDir, 'error.log');
-    
-    const timestamp = new Date().toISOString();
-    const status = cp.status || 500;
-    const method = cp.method || '-';
-    const url = cp.url || '-';
-    const type = cp.type || 'Error';
-    const file = cp.file || '?';
-    const line = cp.line ?? '?';
-    const message = cp.message || 'Unknown error';
-    const stack = err && err.stack ? err.stack : 'No stack trace available';
-
-    const logMessage = `[${timestamp}] [${type}] [Status: ${status}] [${method} ${url}]
-Location: ${file}:${line} (Checkpoint: ${cp.checkpoint || 'unknown'})
-Message: ${message}
-Stack Trace:
-${stack}
---------------------------------------------------------------------------------\n`;
-
-    fs.appendFileSync(logFilePath, logMessage, 'utf8');
+    const { writeErrorLog } = require('./errorFileLogger');
+    writeErrorLog({
+      category: 'ERROR',
+      status: cp.status || 500,
+      type: cp.type || 'Error',
+      file: cp.file || '-',
+      line: cp.line != null ? cp.line : '-',
+      process: cp.checkpoint || 'unknown',
+      method: cp.method || '-',
+      url: cp.url || '-',
+      user: cp.email || '-',
+      message: cp.message || 'Unknown error',
+      stack: err && err.stack ? err.stack : null,
+      details: cp.details || null
+    });
   } catch (writeErr) {
     console.warn('[LOG_WRITE_ERROR] Failed to write to error.log:', writeErr.message);
   }
 }
 
 /**
- * Persist structured error into do_operator_activities (ERROR / SYSTEM_ERROR).
+ * Persist structured error into do_operator_activities (ERROR / SYSTEM_ERROR)
+ * AND always append to the on-disk error log files.
  */
 async function logErrorCheckpoint(err, meta = {}) {
   const cp = buildCheckpoint(err, meta);
-  const email = meta.email || 'system';
+  // Carry email onto checkpoint for the file logger
+  cp.email = meta.email || 'system';
+  const email = cp.email;
   const description = formatCheckpointDescription(cp);
 
   console.error(`[ERROR] ${cp.status || 500} ${cp.method || '-'} ${cp.url || '-'} | ${cp.type || 'Error'} @ ${cp.file || '?'}:${cp.line ?? '?'} | ${cp.message}`);
 
-  // Record error details to backend/logs/error.log file
+  // Always store on disk (file name, status, date/time, process)
   logToFile(cp, err);
 
   try {
     await logActivity(email, 'SYSTEM_ERROR', 'ERROR', description);
   } catch (logErr) {
     console.error('Failed to persist error checkpoint:', logErr.message);
+    // Still keep a file trail if DB activity log fails
+    try {
+      const { writeFailedProcess } = require('./errorFileLogger');
+      writeFailedProcess('logActivity', logErr, {
+        status: 500,
+        details: { original: description }
+      });
+    } catch (_) {}
   }
 
   return cp;
@@ -176,13 +178,18 @@ async function logErrorCheckpoint(err, meta = {}) {
 
 /**
  * Standard controller catch helper.
- * Logs checkpoint then returns JSON { error, checkpoint }.
+ * Logs a checkpoint (file + console + activity) then returns a safe JSON body:
+ *   { success: false, message, error, checkpoint: { type, status, file, line, ... } }
  *
- * Usage:
+ * 5xx responses never leak raw SQL / stack traces — only clientMessage.
+ *
+ * Usage in any controller:
+ *   const { handleControllerError } = require('../utils/errorHandler');
+ *   ...
  *   } catch (err) {
  *     return handleControllerError(res, err, {
- *       checkpoint: 'getInwardLogs',
- *       req,
+ *       checkpoint: 'getInwardLogs',          // unique name for logs
+ *       req,                                 // fills method/url/email
  *       clientMessage: 'Failed to fetch inward logs.'
  *     });
  *   }
@@ -190,7 +197,11 @@ async function logErrorCheckpoint(err, meta = {}) {
 async function handleControllerError(res, err, options = {}) {
   const req = options.req || null;
   const statusCode = resolveStatusCode(err, options.statusCode || 500);
-  const clientMessage = options.clientMessage || err?.message || 'A system error occurred.';
+  // 5xx: never leak internal DB/stack messages to clients
+  const clientMessage =
+    statusCode >= 500
+      ? options.clientMessage || 'A system error occurred. Please contact support.'
+      : options.clientMessage || err?.message || 'Request failed.';
 
   const cp = await logErrorCheckpoint(err, {
     checkpoint: options.checkpoint || 'controller',
@@ -208,6 +219,8 @@ async function handleControllerError(res, err, options = {}) {
   res.locals.errorCheckpointLogged = true;
 
   return res.status(statusCode).json({
+    success: false,
+    message: clientMessage,
     error: clientMessage,
     checkpoint: {
       type: cp.type,
@@ -241,6 +254,10 @@ async function globalErrorMiddleware(err, req, res, next) {
   res.locals.errorCheckpointLogged = true;
 
   return res.status(statusCode).json({
+    success: false,
+    message: statusCode >= 500
+      ? 'A system error occurred. Please contact support.'
+      : (err.message || 'Request failed.'),
     error: statusCode >= 500
       ? 'A system error occurred. Please contact support.'
       : (err.message || 'Request failed.'),
@@ -266,5 +283,8 @@ module.exports = {
   formatCheckpointDescription,
   logErrorCheckpoint,
   handleControllerError,
-  globalErrorMiddleware
+  globalErrorMiddleware,
+  // Re-export file logger helpers for controllers / scripts
+  writeErrorLog: (...args) => require('./errorFileLogger').writeErrorLog(...args),
+  writeFailedProcess: (...args) => require('./errorFileLogger').writeFailedProcess(...args)
 };

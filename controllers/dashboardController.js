@@ -1,9 +1,120 @@
 // ====================================================================
 // Dashboard Controller (controllers/dashboardController.js)
-// Computes summary metrics for mobile dashboard cards.
+// --------------------------------------------------------------------
+// Mobile/web summary APIs: stats, inventory reconciliation, DO task overview.
+// Errors: always return via handleControllerError (safe message + checkpoint).
+// Customer inventory rows are filtered by allowed_clients / allowed_warehouses.
 // ====================================================================
 
 const db = require('../config/db');
+const { handleControllerError } = require('../utils/errorHandler');
+
+function parseCsvNames(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v || '').trim()).filter(Boolean);
+  }
+  return String(value)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** Scope inventory rows to customer allowed clients / warehouses. */
+function applyCustomerInventoryScope(rows, user) {
+  if (!user || user.role !== 'customer') return rows;
+  const clients = parseCsvNames(user.allowed_clients).map((c) => c.toLowerCase());
+  const warehouses = parseCsvNames(user.allowed_warehouses).map((w) => w.toLowerCase());
+  if (clients.length === 0 && warehouses.length === 0) return rows;
+
+  return (rows || []).filter((r) => {
+    const client = String(r.client_name || '').trim().toLowerCase();
+    const warehouse = String(r.warehouse_name || '').trim().toLowerCase();
+    const clientOk = clients.length === 0 || clients.includes(client);
+    const warehouseOk = warehouses.length === 0 || warehouses.includes(warehouse);
+    return clientOk && warehouseOk;
+  });
+}
+
+/** Scope inventory rows to DO operator warehouse + assigned clients. */
+async function applyDoInventoryScope(rows, user) {
+  if (!user || user.role !== 'do_operator') return rows;
+
+  let warehouse = String(user.warehouse_name || user.warehouse || '').trim();
+  let limit = parseInt(user.chamber_limit || 4, 10);
+  if (!Number.isFinite(limit) || limit < 1) limit = 4;
+
+  try {
+    const [opRows] = await db.query(
+      'SELECT warehouse_name, chamber_limit FROM do_operators WHERE email = ? LIMIT 1',
+      [user.email]
+    );
+    if (opRows.length > 0) {
+      if (opRows[0].warehouse_name) {
+        warehouse = String(opRows[0].warehouse_name).trim();
+      }
+      const lim = parseInt(opRows[0].chamber_limit || limit, 10);
+      if (Number.isFinite(lim) && lim >= 1) limit = lim;
+    }
+  } catch (_) {
+    // keep JWT/profile values
+  }
+
+  let filtered = Array.isArray(rows) ? [...rows] : [];
+  const whLower = warehouse.toLowerCase();
+
+  // Same rule as chamber-temp DO access: own warehouse OR blank warehouse
+  if (whLower) {
+    filtered = filtered.filter((r) => {
+      const wh = String(r.warehouse_name || '').trim().toLowerCase();
+      return !wh || wh === whLower;
+    });
+  }
+
+  // Clients the DO can work with: active assignments for their warehouse + chamber limit
+  try {
+    const [assignRows] = await db.query(
+      `SELECT cca.client_name, c.name AS chamber_name
+       FROM chamber_client_assignments cca
+       JOIN chambers c ON cca.chamber_id = c.id
+       WHERE cca.status = 'active'
+         AND (
+           ? = ''
+           OR cca.warehouse_name IS NULL
+           OR TRIM(cca.warehouse_name) = ''
+           OR LOWER(TRIM(cca.warehouse_name)) = ?
+         )`,
+      [warehouse, whLower]
+    );
+
+    const clients = new Set();
+    (assignRows || []).forEach((row) => {
+      const name = String(row.chamber_name || '');
+      const m = name.match(/^Chamber\s+(\d+)$/i);
+      const num = m
+        ? parseInt(m[1], 10)
+        : (() => {
+            const any = name.match(/(\d+)/);
+            return any ? parseInt(any[1], 10) : null;
+          })();
+      if (num != null && num > limit) return;
+      const client = String(row.client_name || '').trim().toLowerCase();
+      if (client && client !== 'general') clients.add(client);
+    });
+
+    if (clients.size > 0) {
+      const byClient = filtered.filter((r) =>
+        clients.has(String(r.client_name || '').trim().toLowerCase())
+      );
+      // Keep client filter only when it still returns data; else keep warehouse-scoped rows
+      if (byClient.length > 0) filtered = byClient;
+    }
+  } catch (err) {
+    console.warn('DO inventory client scope skipped:', err.message);
+  }
+
+  return filtered;
+}
 
 /**
  * GET DASHBOARD STATS SUMMARY
@@ -105,11 +216,10 @@ exports.getDashboardStats = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error fetching dashboard stats:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while calculating dashboard statistics.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'getDashboardStats',
+      req,
+      clientMessage: 'Server error while calculating dashboard statistics.'
     });
   }
 };
@@ -257,8 +367,11 @@ exports.getAccessScopeOptions = async (req, res) => {
       warehouseClients: warehouseClientMap
     });
   } catch (error) {
-    console.error('Error fetching access scope options:', error);
-    return res.status(500).json({ error: 'Failed to fetch options.' });
+    return handleControllerError(res, error, {
+      checkpoint: 'getAccessScopeOptions',
+      req,
+      clientMessage: 'Failed to fetch options.'
+    });
   }
 };
 
@@ -342,11 +455,10 @@ exports.getInventoryFilterOptions = async (req, res) => {
       warehouses
     });
   } catch (error) {
-    console.error('Error fetching inventory filter options:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while loading live warehouse/client filters.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'getInventoryFilterOptions',
+      req,
+      clientMessage: 'Server error while loading live warehouse/client filters.'
     });
   }
 };
@@ -365,11 +477,11 @@ exports.getInventoryReconciliation = async (req, res) => {
         cw.warehouse_name,
         COALESCE(i.total_inward, 0) AS total_inward_boxes,
         COALESCE(o.total_outward, 0) AS total_outward_boxes,
-        (COALESCE(i.total_inward, 0) - COALESCE(o.total_outward, 0)) AS calculated_balance,
+        GREATEST(0, COALESCE(i.total_inward, 0) - COALESCE(o.total_outward, 0)) AS calculated_balance,
         COALESCE(d.last_box_count, 0) AS physical_audit_count,
         d.last_audit_date,
         d.chamber_name,
-        ((COALESCE(i.total_inward, 0) - COALESCE(o.total_outward, 0)) - COALESCE(d.last_box_count, 0)) AS discrepancy
+        (GREATEST(0, COALESCE(i.total_inward, 0) - COALESCE(o.total_outward, 0)) - COALESCE(d.last_box_count, 0)) AS discrepancy
       FROM (
         SELECT DISTINCT client_name, warehouse_name FROM (
           SELECT client_name, warehouse_name FROM daily_chamber_temp_logs WHERE client_name IS NOT NULL AND TRIM(client_name) != ''
@@ -390,24 +502,58 @@ exports.getInventoryReconciliation = async (req, res) => {
         GROUP BY outward_client_name, warehouse_name
       ) o ON cw.client_name = o.outward_client_name AND (cw.warehouse_name = o.warehouse_name OR (cw.warehouse_name IS NULL AND o.warehouse_name IS NULL))
       LEFT JOIN (
-        SELECT d1.client_name, d1.warehouse_name, d1.box_count AS last_box_count, d1.entry_date AS last_audit_date, d1.chamber_name
+        SELECT d1.client_name, d1.warehouse_name, d1.box_count AS last_box_count,
+               d1.entry_date AS last_audit_date, d1.chamber_name
         FROM daily_chamber_temp_logs d1
         INNER JOIN (
-          SELECT client_name, warehouse_name, MAX(entry_date) AS max_date
-          FROM daily_chamber_temp_logs
-          GROUP BY client_name, warehouse_name
-        ) d2 ON d1.client_name = d2.client_name AND (d1.warehouse_name = d2.warehouse_name OR (d1.warehouse_name IS NULL AND d2.warehouse_name IS NULL)) AND d1.entry_date = d2.max_date
+          SELECT t.client_name, t.warehouse_name, MAX(t.id) AS max_id
+          FROM daily_chamber_temp_logs t
+          INNER JOIN (
+            SELECT client_name, warehouse_name, MAX(entry_date) AS max_date
+            FROM daily_chamber_temp_logs
+            GROUP BY client_name, warehouse_name
+          ) latest
+            ON t.client_name = latest.client_name
+           AND (
+             t.warehouse_name = latest.warehouse_name
+             OR (t.warehouse_name IS NULL AND latest.warehouse_name IS NULL)
+           )
+           AND t.entry_date = latest.max_date
+          GROUP BY t.client_name, t.warehouse_name
+        ) pick ON d1.id = pick.max_id
       ) d ON cw.client_name = d.client_name AND (cw.warehouse_name = d.warehouse_name OR (cw.warehouse_name IS NULL AND d.warehouse_name IS NULL))
     `;
 
     const [rows] = await db.query(sql);
 
-    // Filter results in JavaScript for maximum safety and flexibility
-    let filteredRows = rows;
+    // One lot per client + warehouse (never Morning + Evening as two lots)
+    const lotMap = new Map();
+    for (const r of rows || []) {
+      const key = `${String(r.client_name || '')
+        .trim()
+        .toLowerCase()}|||${String(r.warehouse_name || '')
+        .trim()
+        .toLowerCase()}`;
+      if (!lotMap.has(key)) lotMap.set(key, r);
+    }
+    let filteredRows = Array.from(lotMap.values());
+
+    // Customer portal: only assigned clients / warehouses
+    filteredRows = applyCustomerInventoryScope(filteredRows, req.user);
+    // DO portal: warehouse + assigned clients (chamber_limit aware)
+    filteredRows = await applyDoInventoryScope(filteredRows, req.user);
 
     if (warehouse && warehouse !== 'All') {
       const warehouseLower = warehouse.toLowerCase().trim();
       filteredRows = filteredRows.filter(r => r.warehouse_name && r.warehouse_name.toLowerCase().trim() === warehouseLower);
+    }
+
+    const clientFilter = req.query.client;
+    if (clientFilter && clientFilter !== 'All') {
+      const clientLower = String(clientFilter).toLowerCase().trim();
+      filteredRows = filteredRows.filter(
+        (r) => r.client_name && r.client_name.toLowerCase().trim() === clientLower
+      );
     }
 
     if (search && search.trim() !== '') {
@@ -424,11 +570,10 @@ exports.getInventoryReconciliation = async (req, res) => {
       items: filteredRows
     });
   } catch (error) {
-    console.error('Error fetching inventory reconciliation logs:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while calculating inventory logs.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'getInventoryReconciliation',
+      req,
+      clientMessage: 'Server error while calculating inventory logs.'
     });
   }
 };
@@ -646,11 +791,203 @@ exports.getDailyInventoryDeltas = async (req, res) => {
       items: deltas
     });
   } catch (error) {
-    console.error('Error fetching daily inventory deltas:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while calculating daily inventory deltas.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'getDailyInventoryDeltas',
+      req,
+      clientMessage: 'Server error while calculating daily inventory deltas.'
+    });
+  }
+};
+
+/**
+ * GET DO TASK OVERVIEW (warehouse-wise)
+ * For Sub-Admin / Super Admin mobile home:
+ * DO names, today completed / pending, overdue (past 5 days).
+ */
+exports.getDoTaskOverview = async (req, res) => {
+  try {
+    const pad = (n) => String(n).padStart(2, '0');
+    const toYmd = (d) =>
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+    // Prefer India local "today" (pool timezone is +05:30; Date here is server local)
+    const now = new Date();
+    const todayStr = toYmd(now);
+    const hour = now.getHours();
+    const expectedShifts = hour >= 16 ? ['Morning', 'Evening'] : ['Morning'];
+
+    const pastDates = [];
+    for (let i = 1; i <= 5; i += 1) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i);
+      pastDates.push(toYmd(d));
+    }
+
+    const [operators] = await db.query(
+      `SELECT id, email, full_name, warehouse_name, chamber_limit
+       FROM do_operators
+       ORDER BY warehouse_name ASC, full_name ASC`
+    );
+
+    const [assignments] = await db.query(`
+      SELECT
+        a.chamber_id,
+        a.client_name,
+        a.warehouse_name AS assignment_warehouse,
+        c.name AS chamber_name
+      FROM chamber_client_assignments a
+      JOIN chambers c ON c.id = a.chamber_id
+      WHERE a.status = 'active'
+        AND a.client_name IS NOT NULL
+        AND TRIM(a.client_name) <> ''
+        AND LOWER(TRIM(a.client_name)) <> 'general'
+    `);
+
+    const dateList = [todayStr, ...pastDates];
+    const [logs] = await db.query(
+      `SELECT
+         DATE_FORMAT(entry_date, '%Y-%m-%d') AS entry_date,
+         client_name,
+         chamber_name,
+         chamber_id,
+         warehouse_name,
+         shift,
+         inspection_time
+       FROM daily_chamber_temp_logs
+       WHERE entry_date IN (?)`,
+      [dateList]
+    );
+
+    const normalizeShift = (row) => {
+      const s = String(row.shift || '').trim();
+      if (/^morning$/i.test(s)) return 'Morning';
+      if (/^evening$/i.test(s)) return 'Evening';
+      const t = String(row.inspection_time || '').trim().toUpperCase();
+      if (t.startsWith('16:') || t.startsWith('18:') || t.includes('04:00 PM') || t.includes('06:00 PM')) {
+        return 'Evening';
+      }
+      return 'Morning';
+    };
+
+    const normalizeWh = (v) => {
+      const s = String(v || '').trim();
+      return s || 'Unassigned';
+    };
+
+    const logKey = (date, chamber, client, shift) =>
+      `${date}|${String(chamber || '').trim().toLowerCase()}|${String(client || '').trim().toLowerCase()}|${shift}`;
+
+    const dayClientKey = (date, chamber, client) =>
+      `${date}|${String(chamber || '').trim().toLowerCase()}|${String(client || '').trim().toLowerCase()}`;
+
+    const todayLogSet = new Set();
+    const pastLogSet = new Set();
+    (logs || []).forEach((row) => {
+      const date = String(row.entry_date || '').slice(0, 10);
+      if (!date) return;
+      const chamber = row.chamber_name;
+      const client = row.client_name;
+      if (date === todayStr) {
+        todayLogSet.add(logKey(date, chamber, client, normalizeShift(row)));
+      } else {
+        pastLogSet.add(dayClientKey(date, chamber, client));
+      }
+    });
+
+    const buckets = new Map();
+
+    const ensureBucket = (warehouse) => {
+      const key = normalizeWh(warehouse).toLowerCase();
+      if (!buckets.has(key)) {
+        buckets.set(key, {
+          warehouse_name: normalizeWh(warehouse),
+          operators: [],
+          assignment_count: 0,
+          completed: 0,
+          pending: 0,
+          overdue: 0,
+          expected_today: 0,
+          morning_pending: 0,
+          evening_pending: 0
+        });
+      }
+      return buckets.get(key);
+    };
+
+    (operators || []).forEach((op) => {
+      const bucket = ensureBucket(op.warehouse_name);
+      bucket.operators.push({
+        id: op.id,
+        name: op.full_name || op.email?.split('@')[0] || 'DO',
+        email: op.email,
+        chamber_limit: op.chamber_limit
+      });
+    });
+
+    (assignments || []).forEach((a) => {
+      const warehouse = a.assignment_warehouse || 'Unassigned';
+      const bucket = ensureBucket(warehouse);
+      bucket.assignment_count += 1;
+
+      expectedShifts.forEach((shift) => {
+        bucket.expected_today += 1;
+        const done = todayLogSet.has(
+          logKey(todayStr, a.chamber_name, a.client_name, shift)
+        );
+        if (done) {
+          bucket.completed += 1;
+        } else {
+          bucket.pending += 1;
+          if (shift === 'Morning') bucket.morning_pending += 1;
+          if (shift === 'Evening') bucket.evening_pending += 1;
+        }
+      });
+
+      pastDates.forEach((date) => {
+        if (!pastLogSet.has(dayClientKey(date, a.chamber_name, a.client_name))) {
+          bucket.overdue += 1;
+        }
+      });
+    });
+
+    const warehouses = Array.from(buckets.values())
+      .map((w) => ({
+        ...w,
+        do_names: w.operators.map((o) => o.name).join(', ') || 'No DO assigned',
+        status:
+          w.pending === 0 && w.overdue === 0
+            ? 'On track'
+            : w.overdue > 0
+              ? 'Needs attention'
+              : 'In progress'
+      }))
+      .sort((a, b) => a.warehouse_name.localeCompare(b.warehouse_name));
+
+    const summary = warehouses.reduce(
+      (acc, w) => {
+        acc.warehouses += 1;
+        acc.operators += w.operators.length;
+        acc.clients += Number(w.assignment_count) || 0;
+        acc.completed += w.completed;
+        acc.pending += w.pending;
+        acc.overdue += w.overdue;
+        return acc;
+      },
+      { warehouses: 0, operators: 0, clients: 0, completed: 0, pending: 0, overdue: 0 }
+    );
+
+    return res.status(200).json({
+      success: true,
+      today: todayStr,
+      expected_shifts: expectedShifts,
+      summary,
+      warehouses
+    });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'getDoTaskOverview',
+      req,
+      clientMessage: 'Server error while building DO task overview.'
     });
   }
 };

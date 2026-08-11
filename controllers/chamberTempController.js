@@ -6,6 +6,7 @@
 const db = require('../config/db');
 const exifr = require('exifr');
 const fs = require('fs');
+const { getSavedFilePath } = require('../config/multer');
 const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
 const {
@@ -165,22 +166,28 @@ exports.addChamberLog = async (req, res) => {
   let time_variance_minutes = req.body.time_variance_minutes !== undefined ? parseInt(req.body.time_variance_minutes) : 0;
 
   if (req.file) {
-    temp_sensor_image = `uploads/daily_temp_monitor_images/${req.file.filename}`;
+    temp_sensor_image = getSavedFilePath(req.file, 'daily_temp_monitor_images');
     if (!photo_capture_time) {
       try {
-        const exif = await exifr.parse(req.file.path);
-        if (exif && exif.DateTimeOriginal) {
-          const captureDate = exif.DateTimeOriginal;
-          photo_capture_time = formatDateTime(captureDate);
-          time_variance_minutes = calculateVariance(entry_date, inspection_time || '11:00', captureDate);
+        if (req.file.path && /^https?:\/\//i.test(req.file.path)) {
+          const now = new Date();
+          photo_capture_time = formatDateTime(now);
+          time_variance_minutes = calculateVariance(entry_date, inspection_time || '11:00', now);
         } else {
-          const stats = fs.statSync(req.file.path);
-          const fileTime = stats.birthtime || stats.mtime;
-          photo_capture_time = formatDateTime(fileTime);
-          time_variance_minutes = calculateVariance(entry_date, inspection_time || '11:00', fileTime);
+          const exif = await exifr.parse(req.file.path);
+          if (exif && exif.DateTimeOriginal) {
+            const captureDate = exif.DateTimeOriginal;
+            photo_capture_time = formatDateTime(captureDate);
+            time_variance_minutes = calculateVariance(entry_date, inspection_time || '11:00', captureDate);
+          } else {
+            const stats = fs.statSync(req.file.path);
+            const fileTime = stats.birthtime || stats.mtime;
+            photo_capture_time = formatDateTime(fileTime);
+            time_variance_minutes = calculateVariance(entry_date, inspection_time || '11:00', fileTime);
+          }
         }
       } catch (e) {
-        console.warn('Warning: Failed to parse EXIF metadata. Defaulting to file stats or current time.', e.message);
+        console.warn('Warning: Failed to parse EXIF metadata. Defaulting to current time.', e.message);
         const now = new Date();
         photo_capture_time = formatDateTime(now);
         time_variance_minutes = calculateVariance(entry_date, inspection_time || '11:00', now);
@@ -333,16 +340,21 @@ exports.updateChamberLog = async (req, res) => {
       const mergedInspectionTime = inspection_time || current.inspection_time;
 
       if (req.file) {
-        temp_sensor_image = `uploads/daily_temp_monitor_images/${req.file.filename}`;
+        temp_sensor_image = getSavedFilePath(req.file, 'daily_temp_monitor_images');
         try {
-          const exif = await exifr.parse(req.file.path);
-          if (exif && exif.DateTimeOriginal) {
-            const captureDate = exif.DateTimeOriginal;
-            photo_capture_time = formatDateTime(captureDate);
+          if (req.file.path && /^https?:\/\//i.test(req.file.path)) {
+            const now = new Date();
+            photo_capture_time = formatDateTime(now);
           } else {
-            const stats = fs.statSync(req.file.path);
-            const fileTime = stats.birthtime || stats.mtime;
-            photo_capture_time = formatDateTime(fileTime);
+            const exif = await exifr.parse(req.file.path);
+            if (exif && exif.DateTimeOriginal) {
+              const captureDate = exif.DateTimeOriginal;
+              photo_capture_time = formatDateTime(captureDate);
+            } else {
+              const stats = fs.statSync(req.file.path);
+              const fileTime = stats.birthtime || stats.mtime;
+              photo_capture_time = formatDateTime(fileTime);
+            }
           }
         } catch (e) {
           const now = new Date();
@@ -476,7 +488,7 @@ exports.updateChamberLog = async (req, res) => {
       if (box_temp !== undefined) item.box_temp = box_temp !== '' ? parseFloat(box_temp) : null;
       if (monitor_supervisor_name) item.monitor_supervisor_name = monitor_supervisor_name;
       if (req.file) {
-        item.temp_sensor_image = `uploads/daily_temp_monitor_images/${req.file.filename}`;
+        item.temp_sensor_image = getSavedFilePath(req.file, 'daily_temp_monitor_images');
         const now = new Date();
         item.photo_capture_time = formatDateTime(now);
       }

@@ -32,8 +32,8 @@ router.get(
 // 6. Request edit permission (DO Operator)
 router.post('/', verifyToken, permissionController.createPermissionRequest);
 
-// 7. Approve or deny permission request (Super Admin only)
-router.put('/:id', verifyToken, requireRole(['super_admin']), permissionController.updatePermissionRequestStatus);
+// 7. Approve or deny permission request (Super Admin / Sub-Admin)
+router.put('/:id', verifyToken, requireRole(['super_admin', 'sub_admin']), permissionController.updatePermissionRequestStatus);
 
 // 8. DO marks notification as handled (Completed section)
 router.patch(

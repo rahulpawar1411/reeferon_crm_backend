@@ -11,14 +11,7 @@ const { handleControllerError } = require('../utils/errorHandler');
 const { sendSubAdminCredentialsEmail } = require('../utils/emailService');
 
 async function queryCustomers(sql, params = []) {
-  try {
-    return await db.query(sql, params);
-  } catch (err) {
-    if (err.code === 'ER_NO_SUCH_TABLE' && /\bcustomers\b/i.test(sql)) {
-      return await db.query(sql.replace(/\bcustomers\b/gi, 'sub_admins'), params);
-    }
-    throw err;
-  }
+  return db.query(sql, params);
 }
 
 // 1. GET ALL CUSTOMERS
@@ -49,7 +42,7 @@ exports.createSubAdmin = async (req, res) => {
       return res.status(400).json({ error: 'All fields (Email, Password, Full Name, Phone No.) are required.' });
     }
 
-    // Check if customer email already exists
+    // Check if customer email already exists (or used by another role)
     const [existing] = await queryCustomers(
       'SELECT id FROM customers WHERE email = ? LIMIT 1',
       [cleanEmail]
@@ -57,6 +50,12 @@ exports.createSubAdmin = async (req, res) => {
     if (existing.length > 0) {
       return res.status(400).json({ error: 'Customer email already exists.' });
     }
+    const [sa] = await db.query('SELECT id FROM super_admin WHERE email = ? LIMIT 1', [cleanEmail]);
+    if (sa.length) return res.status(400).json({ error: 'Email already used by Super Admin.' });
+    const [appSub] = await db.query('SELECT id FROM sub_admins WHERE email = ? LIMIT 1', [cleanEmail]);
+    if (appSub.length) return res.status(400).json({ error: 'Email already used by a Sub-Admin.' });
+    const [ops] = await db.query('SELECT id FROM do_operators WHERE email = ? LIMIT 1', [cleanEmail]);
+    if (ops.length) return res.status(400).json({ error: 'Email already used by a Data Operator.' });
 
     // Hash password
     const salt = await bcrypt.genSalt(10);

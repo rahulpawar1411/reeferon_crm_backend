@@ -1,0 +1,3 @@
+# SQL / JSON database backups — do not commit production dumps
+*
+!.gitignore

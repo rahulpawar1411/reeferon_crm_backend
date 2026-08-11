@@ -110,7 +110,7 @@ exports.getPermissionRequests = async (req, res) => {
           ON a.log_type = 'Chamber' AND c.id = a.permission_req
     `;
 
-    if (req.user.role === 'super_admin') {
+    if (req.user.role === 'super_admin' || req.user.role === 'sub_admin') {
       [rows] = await db.query(`
         ${selectCols}
         WHERE a.log_type IN ('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster')

@@ -6,6 +6,7 @@
 const db = require('../config/db');
 const fs = require('fs');
 const path = require('path');
+const { getSavedFilePath } = require('../config/multer');
 const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
 const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAccessScope } = require('../utils/pagination');
@@ -104,25 +105,25 @@ exports.addInwardLog = async (req, res) => {
 
     let damage_photos_list = [];
     if (files.inward_damage_boxes_photo) {
-      damage_photos_list = files.inward_damage_boxes_photo.map(f => `uploads/inward_images/${f.filename}`);
+      damage_photos_list = files.inward_damage_boxes_photo.map(f => getSavedFilePath(f, 'inward_images'));
     }
     const inward_damage_boxes_photo = damage_photos_list.length > 0 ? damage_photos_list.join(',') : null;
 
     let invoice_photos_list = [];
     if (files.inward_invoice_photos) {
-      invoice_photos_list = files.inward_invoice_photos.map(f => `uploads/inward_images/${f.filename}`);
+      invoice_photos_list = files.inward_invoice_photos.map(f => getSavedFilePath(f, 'inward_images'));
     }
     const inward_invoice_photos = invoice_photos_list.length > 0 ? invoice_photos_list.join(',') : null;
 
     let count_sheet_list = [];
     if (files.inward_count_sheet_photo) {
-      count_sheet_list = files.inward_count_sheet_photo.map(f => `uploads/inward_images/${f.filename}`);
+      count_sheet_list = files.inward_count_sheet_photo.map(f => getSavedFilePath(f, 'inward_images'));
     }
     const inward_count_sheet_photo = count_sheet_list.length > 0 ? count_sheet_list.join(',') : null;
 
     // Single photos mapping
     const getPhotoPath = (fieldName) => {
-      return files[fieldName] ? `uploads/inward_images/${files[fieldName][0].filename}` : null;
+      return files[fieldName] ? getSavedFilePath(files[fieldName][0], 'inward_images') : null;
     };
 
     const inward_pod_photo = getPhotoPath('inward_pod_photo');
@@ -348,7 +349,7 @@ exports.updateInwardLog = async (req, res) => {
 
     // Single photos merging
     const getPhotoPath = (fieldName, fallbackValue) => {
-      return files[fieldName] ? `uploads/inward_images/${files[fieldName][0].filename}` : fallbackValue;
+      return files[fieldName] ? getSavedFilePath(files[fieldName][0], 'inward_images') : fallbackValue;
     };
 
     const inward_pod_photo = getPhotoPath('inward_pod_photo', current.inward_pod_photo);
@@ -360,17 +361,17 @@ exports.updateInwardLog = async (req, res) => {
 
     let inward_invoice_photos = current.inward_invoice_photos;
     if (files.inward_invoice_photos) {
-      inward_invoice_photos = files.inward_invoice_photos.map(f => `uploads/inward_images/${f.filename}`).join(',');
+      inward_invoice_photos = files.inward_invoice_photos.map(f => getSavedFilePath(f, 'inward_images')).join(',');
     }
 
     let inward_count_sheet_photo = current.inward_count_sheet_photo;
     if (files.inward_count_sheet_photo) {
-      inward_count_sheet_photo = files.inward_count_sheet_photo.map(f => `uploads/inward_images/${f.filename}`).join(',');
+      inward_count_sheet_photo = files.inward_count_sheet_photo.map(f => getSavedFilePath(f, 'inward_images')).join(',');
     }
 
     let inward_damage_boxes_photo = current.inward_damage_boxes_photo;
     if (files.inward_damage_boxes_photo) {
-      const damage_photos_list = files.inward_damage_boxes_photo.map(f => `uploads/inward_images/${f.filename}`);
+      const damage_photos_list = files.inward_damage_boxes_photo.map(f => getSavedFilePath(f, 'inward_images'));
       inward_damage_boxes_photo = damage_photos_list.join(',');
     }
 
@@ -622,7 +623,7 @@ exports.updateInwardPodPhoto = async (req, res) => {
     }
 
     const current = existing[0];
-    const newPath = `uploads/inward_images/${uploaded.filename}`;
+    const newPath = getSavedFilePath(uploaded, 'inward_images');
     const localTimestamp = formatDateTime(new Date());
     const podDiff = current.inward_pod_photo
       ? 'POD Photo: (previous file) → (new file)'

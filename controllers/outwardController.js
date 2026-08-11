@@ -6,6 +6,7 @@
 const db = require('../config/db');
 const fs = require('fs');
 const path = require('path');
+const { getSavedFilePath } = require('../config/multer');
 const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
 const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAccessScope } = require('../utils/pagination');
@@ -104,25 +105,25 @@ exports.addOutwardLog = async (req, res) => {
 
     let damage_photos_list = [];
     if (files.outward_damage_boxes_photo) {
-      damage_photos_list = files.outward_damage_boxes_photo.map(f => `uploads/outward_images/${f.filename}`);
+      damage_photos_list = files.outward_damage_boxes_photo.map(f => getSavedFilePath(f, 'outward_images'));
     }
     const outward_damage_boxes_photo = damage_photos_list.length > 0 ? damage_photos_list.join(',') : null;
 
     let invoice_photos_list = [];
     if (files.outward_invoice_photos) {
-      invoice_photos_list = files.outward_invoice_photos.map(f => `uploads/outward_images/${f.filename}`);
+      invoice_photos_list = files.outward_invoice_photos.map(f => getSavedFilePath(f, 'outward_images'));
     }
     const outward_invoice_photos = invoice_photos_list.length > 0 ? invoice_photos_list.join(',') : null;
 
     let count_sheet_list = [];
     if (files.outward_count_sheet_photo) {
-      count_sheet_list = files.outward_count_sheet_photo.map(f => `uploads/outward_images/${f.filename}`);
+      count_sheet_list = files.outward_count_sheet_photo.map(f => getSavedFilePath(f, 'outward_images'));
     }
     const outward_count_sheet_photo = count_sheet_list.length > 0 ? count_sheet_list.join(',') : null;
 
     // Single photos mapping
     const getPhotoPath = (fieldName) => {
-      return files[fieldName] ? `uploads/outward_images/${files[fieldName][0].filename}` : null;
+      return files[fieldName] ? getSavedFilePath(files[fieldName][0], 'outward_images') : null;
     };
 
     const outward_pod_photo = getPhotoPath('outward_pod_photo');
@@ -359,7 +360,7 @@ exports.updateOutwardLog = async (req, res) => {
 
     // Single photos merging
     const getPhotoPath = (fieldName, fallbackValue) => {
-      return files[fieldName] ? `uploads/outward_images/${files[fieldName][0].filename}` : fallbackValue;
+      return files[fieldName] ? getSavedFilePath(files[fieldName][0], 'outward_images') : fallbackValue;
     };
 
     const outward_pod_photo = getPhotoPath('outward_pod_photo', current.outward_pod_photo);
@@ -372,19 +373,19 @@ exports.updateOutwardLog = async (req, res) => {
 
     let outward_invoice_photos = current.outward_invoice_photos;
     if (files.outward_invoice_photos) {
-      const invoice_photos_list = files.outward_invoice_photos.map(f => `uploads/outward_images/${f.filename}`);
+      const invoice_photos_list = files.outward_invoice_photos.map(f => getSavedFilePath(f, 'outward_images'));
       outward_invoice_photos = invoice_photos_list.join(',');
     }
 
     let outward_count_sheet_photo = current.outward_count_sheet_photo;
     if (files.outward_count_sheet_photo) {
-      const count_sheet_list = files.outward_count_sheet_photo.map(f => `uploads/outward_images/${f.filename}`);
+      const count_sheet_list = files.outward_count_sheet_photo.map(f => getSavedFilePath(f, 'outward_images'));
       outward_count_sheet_photo = count_sheet_list.join(',');
     }
 
     let outward_damage_boxes_photo = current.outward_damage_boxes_photo;
     if (files.outward_damage_boxes_photo) {
-      const damage_photos_list = files.outward_damage_boxes_photo.map(f => `uploads/outward_images/${f.filename}`);
+      const damage_photos_list = files.outward_damage_boxes_photo.map(f => getSavedFilePath(f, 'outward_images'));
       outward_damage_boxes_photo = damage_photos_list.join(',');
     }
 
@@ -648,7 +649,7 @@ exports.updateOutwardPodPhoto = async (req, res) => {
     }
 
     const current = existing[0];
-    const newPath = `uploads/outward_images/${uploaded.filename}`;
+    const newPath = getSavedFilePath(uploaded, 'outward_images');
     const localTimestamp = formatDateTime(new Date());
     const podDiff = current.outward_pod_photo
       ? 'POD Photo: (previous file) → (new file)'

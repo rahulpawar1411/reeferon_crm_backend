@@ -1,7 +1,15 @@
+// ====================================================================
+// Chamber Controller (controllers/chamberController.js)
+// --------------------------------------------------------------------
+// Chambers list, client assignments, DO inspections (multipart + photo).
+// Catch blocks → handleControllerError (no raw error.message to clients).
+// ====================================================================
+
 const db = require('../config/db');
-const { logErrorCheckpoint } = require('../utils/errorHandler');
+const { logErrorCheckpoint, handleControllerError } = require('../utils/errorHandler');
 const exifr = require('exifr');
 const fs = require('fs');
+const { getSavedFilePath } = require('../config/multer');
 const { logActivity, getActorLabel } = require('../utils/logger');
 
 /**
@@ -179,11 +187,10 @@ exports.getChambers = async (req, res) => {
       chamber_limit: appliedLimit
     });
   } catch (error) {
-    console.error('Error fetching chambers:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch chambers.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'Error_fetching_chambers_error_',
+      req,
+      clientMessage: 'Failed to fetch chambers.'
     });
   }
 };
@@ -225,11 +232,10 @@ exports.getAssignments = async (req, res) => {
       data: filteredRows
     });
   } catch (error) {
-    console.error('Error fetching assignments:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch chamber client assignments.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'Error_fetching_assignments_error_',
+      req,
+      clientMessage: 'Failed to fetch chamber client assignments.'
     });
   }
 };
@@ -282,19 +288,23 @@ exports.addInspection = async (req, res) => {
     let time_variance_minutes = 0;
 
     if (req.file) {
-      photoUrl = `uploads/daily_temp_monitor_images/${req.file.filename}`;
+      photoUrl = getSavedFilePath(req.file, 'daily_temp_monitor_images');
       
       // If photo_capture_time is not provided, try to extract it from image EXIF or file stats
       if (!photo_capture_time) {
         try {
-          const exif = await exifr.parse(req.file.path);
-          if (exif && exif.DateTimeOriginal) {
-            const captureDate = exif.DateTimeOriginal;
-            photo_capture_time = formatDateTime(captureDate);
+          if (req.file.path && /^https?:\/\//i.test(req.file.path)) {
+            photo_capture_time = formatDateTime(new Date());
           } else {
-            const stats = fs.statSync(req.file.path);
-            const fileTime = stats.birthtime || stats.mtime;
-            photo_capture_time = formatDateTime(fileTime);
+            const exif = await exifr.parse(req.file.path);
+            if (exif && exif.DateTimeOriginal) {
+              const captureDate = exif.DateTimeOriginal;
+              photo_capture_time = formatDateTime(captureDate);
+            } else {
+              const stats = fs.statSync(req.file.path);
+              const fileTime = stats.birthtime || stats.mtime;
+              photo_capture_time = formatDateTime(fileTime);
+            }
           }
         } catch (e) {
           console.warn('Warning: Failed to parse EXIF metadata for native upload. Defaulting to current time.', e.message);
@@ -385,19 +395,10 @@ exports.addInspection = async (req, res) => {
       reference_no
     });
   } catch (error) {
-    console.error('Error logging daily inspection:', error);
-    await logErrorCheckpoint(error, {
+    return handleControllerError(res, error, {
       checkpoint: 'addInspection',
-      statusCode: 500,
-      method: req.method,
-      url: req.originalUrl,
-      email: req.user?.email || 'system'
-    });
-
-    return res.status(500).json({
-      success: false,
-      message: 'Server error while recording temperature log.',
-      error: error.message
+      req,
+      clientMessage: 'Server error while recording temperature log.'
     });
   }
 };
@@ -437,11 +438,10 @@ exports.getInspections = async (req, res) => {
       data: rows
     });
   } catch (error) {
-    console.error('Error fetching inspections:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch inspections.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'Error_fetching_inspections_error_',
+      req,
+      clientMessage: 'Failed to fetch inspections.'
     });
   }
 };
@@ -483,11 +483,10 @@ exports.deleteInspection = async (req, res) => {
       message: 'Inspection log deleted successfully.'
     });
   } catch (error) {
-    console.error('Error deleting inspection:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to delete inspection.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'Error_deleting_inspection_error_',
+      req,
+      clientMessage: 'Failed to delete inspection.'
     });
   }
 };
@@ -535,11 +534,10 @@ exports.addAssignment = async (req, res) => {
       message: 'Assignment added successfully.'
     });
   } catch (error) {
-    console.error('Error adding assignment:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to add assignment.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'Error_adding_assignment_error_',
+      req,
+      clientMessage: 'Failed to add assignment.'
     });
   }
 };
@@ -589,11 +587,10 @@ exports.deleteAssignment = async (req, res) => {
       message: 'Assignment removed successfully.'
     });
   } catch (error) {
-    console.error('Error deleting assignment:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to delete assignment.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'Error_deleting_assignment_error_',
+      req,
+      clientMessage: 'Failed to delete assignment.'
     });
   }
 };
@@ -744,11 +741,10 @@ exports.createChamber = async (req, res) => {
       data: { id: result.insertId, name }
     });
   } catch (error) {
-    console.error('Error creating chamber:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to create chamber.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'Error_creating_chamber_error_',
+      req,
+      clientMessage: 'Failed to create chamber.'
     });
   }
 };
@@ -809,11 +805,10 @@ exports.updateChamber = async (req, res) => {
       data: updated[0]
     });
   } catch (error) {
-    console.error('Error updating chamber:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update chamber.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'Error_updating_chamber_error_',
+      req,
+      clientMessage: 'Failed to update chamber.'
     });
   }
 };
@@ -873,11 +868,10 @@ exports.deleteChamber = async (req, res) => {
       message: 'Chamber deleted successfully.'
     });
   } catch (error) {
-    console.error('Error deleting chamber:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to delete chamber.',
-      error: error.message
+    return handleControllerError(res, error, {
+      checkpoint: 'Error_deleting_chamber_error_',
+      req,
+      clientMessage: 'Failed to delete chamber.'
     });
   }
 };
