@@ -136,6 +136,82 @@ app.use((req, res, next) => {
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
 
+// Public diagnostic debug endpoint to troubleshoot live sync failures
+app.get('/api/debug-sync', async (req, res) => {
+  const diagnostics = {};
+  const dbPool = require('./config/db');
+  
+  // 1. Test Database Connectivity
+  try {
+    await dbPool.query('SELECT 1');
+    diagnostics.database = { status: 'OK', connected: true };
+  } catch (dbErr) {
+    diagnostics.database = { status: 'ERROR', connected: false, message: dbErr.message };
+  }
+
+  // 2. Test Database Schema Integrity
+  if (diagnostics.database.connected) {
+    try {
+      const [columns] = await dbPool.query('SHOW COLUMNS FROM daily_chamber_temp_logs');
+      diagnostics.schema = {
+        table_exists: true,
+        columns: columns.map(c => c.Field)
+      };
+    } catch (schemaErr) {
+      diagnostics.schema = {
+        table_exists: false,
+        message: schemaErr.message
+      };
+    }
+  }
+
+  // 3. Test Cloudinary Connectivity
+  try {
+    const cloudinary = require('cloudinary').v2;
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET
+    });
+    const dummyBase64 = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+    const uploadResult = await cloudinary.uploader.upload(dummyBase64, { folder: 'crm/debug' });
+    diagnostics.cloudinary = {
+      status: 'OK',
+      public_id: uploadResult.public_id,
+      url: uploadResult.secure_url,
+      config: {
+        cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+        api_key: process.env.CLOUDINARY_API_KEY,
+        has_secret: !!process.env.CLOUDINARY_API_SECRET
+      }
+    };
+  } catch (cloudErr) {
+    diagnostics.cloudinary = {
+      status: 'ERROR',
+      message: cloudErr.message,
+      config: {
+        cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+        api_key: process.env.CLOUDINARY_API_KEY,
+        has_secret: !!process.env.CLOUDINARY_API_SECRET
+      }
+    };
+  }
+
+  // 4. Fetch the last 5 system/upload error logs from the server
+  if (diagnostics.database.connected) {
+    try {
+      const [logs] = await dbPool.query(
+        "SELECT action, description, created_at FROM do_operator_activities WHERE action = 'SYSTEM_ERROR' OR log_type = 'ERROR' ORDER BY id DESC LIMIT 5"
+      );
+      diagnostics.recent_errors = logs;
+    } catch (logErr) {
+      diagnostics.recent_errors_error = logErr.message;
+    }
+  }
+
+  return res.json(diagnostics);
+});
+
 const { verifyToken, requireRole } = require('./middleware/auth');
 
 const authRoutes = require('./routes/authRoutes');
