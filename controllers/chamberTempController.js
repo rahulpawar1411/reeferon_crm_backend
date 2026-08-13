@@ -17,6 +17,7 @@ const {
   appendSubAdminAccessScope
 } = require('../utils/pagination');
 const { logErrorCheckpoint } = require('../utils/errorHandler');
+const { resolveLogAttribution } = require('../utils/logAttribution');
 const {
   hasActivePermission,
   consumeGrantedPermission
@@ -227,6 +228,7 @@ exports.addChamberLog = async (req, res) => {
       return 'Morning';
     };
     const shiftVal = resolveShift(req.body.shift, inspection_time);
+    const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, req.body);
 
     const query = `
       INSERT INTO daily_chamber_temp_logs 
@@ -245,8 +247,8 @@ exports.addChamberLog = async (req, res) => {
       time_variance_minutes,
       localTimestamp,
       localTimestamp,
-      req.user ? req.user.warehouse_name : null,
-      req.user ? req.user.email : null,
+      logWarehouse,
+      logOperatorEmail,
       shiftVal,
       req.body.chamber_type || 'Frozen'
     ];

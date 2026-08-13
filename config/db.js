@@ -335,8 +335,24 @@ async function testDbConnection() {
         await pool.query('ALTER TABLE outward_temp_logs ADD COLUMN outward_pre_vehicle_temp_photo VARCHAR(255) DEFAULT NULL');
         console.log('🌱 Added column outward_pre_vehicle_temp_photo to outward_temp_logs.');
       }
+      if (!colNames.includes('outward_count_sheet_photo')) {
+        await pool.query('ALTER TABLE outward_temp_logs ADD COLUMN outward_count_sheet_photo VARCHAR(255) DEFAULT NULL');
+        console.log('🌱 Added column outward_count_sheet_photo to outward_temp_logs.');
+      }
     } catch (tblErr) {
       console.warn('⚠️ Table outward_temp_logs columns verification failed:', tblErr.message);
+    }
+
+    // Auto migration: inward count-sheet photo (app list/create expects this column)
+    try {
+      const [columns] = await pool.query('SHOW COLUMNS FROM inward_temp_logs');
+      const colNames = columns.map(c => c.Field);
+      if (!colNames.includes('inward_count_sheet_photo')) {
+        await pool.query('ALTER TABLE inward_temp_logs ADD COLUMN inward_count_sheet_photo VARCHAR(255) DEFAULT NULL');
+        console.log('🌱 Added column inward_count_sheet_photo to inward_temp_logs.');
+      }
+    } catch (tblErr) {
+      console.warn('⚠️ Table inward_temp_logs columns verification failed:', tblErr.message);
     }
 
     // Auto migration: create do_operator_activities table if not exists
@@ -530,6 +546,19 @@ async function testDbConnection() {
         )
       `);
       console.log('🌱 Verified chambers table is online.');
+
+      // Auto-migrate: check and add chamber_type column
+      try {
+        const [chCols] = await pool.query('SHOW COLUMNS FROM chambers');
+        const chColNames = chCols.map((c) => c.Field);
+        if (!chColNames.includes('chamber_type')) {
+          await pool.query("ALTER TABLE chambers ADD COLUMN chamber_type VARCHAR(50) DEFAULT 'Frozen'");
+          console.log('🌱 Added column chamber_type to chambers table.');
+        }
+      } catch (migrateErr) {
+        console.warn('⚠️ chambers table migration failed:', migrateErr.message);
+      }
+
       // total_clients removed — completion = Master Setup client count per chamber
       try {
         const [chCols] = await pool.query('SHOW COLUMNS FROM chambers');
@@ -582,6 +611,11 @@ async function testDbConnection() {
           await pool.query('ALTER TABLE chamber_client_assignments ADD UNIQUE KEY uq_chamber_client_wh (chamber_id, client_name, warehouse_name)');
           console.log('🌱 Added unique index uq_chamber_client_wh.');
         } catch (idxErr) {}
+      }
+      
+      if (!colNames.includes('chamber_type')) {
+        await pool.query("ALTER TABLE chamber_client_assignments ADD COLUMN chamber_type VARCHAR(50) DEFAULT 'Frozen'");
+        console.log('🌱 Added column chamber_type to chamber_client_assignments.');
       }
 
       if (!colNames.includes('remark')) {

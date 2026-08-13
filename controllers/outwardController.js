@@ -11,6 +11,7 @@ const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
 const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAccessScope } = require('../utils/pagination');
 const { handleControllerError } = require('../utils/errorHandler');
+const { resolveLogAttribution } = require('../utils/logAttribution');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -140,6 +141,7 @@ exports.addOutwardLog = async (req, res) => {
     }
 
     const localTimestamp = formatDateTime(new Date());
+    const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, data);
 
     let startWithDate = data.outward_loading_start_time || null;
     if (data.outward_entry_date && data.outward_loading_start_time) {
@@ -236,8 +238,8 @@ exports.addOutwardLog = async (req, res) => {
       outward_damage_boxes_photo,
       localTimestamp,
       localTimestamp,
-      req.user ? req.user.warehouse_name : null,
-      req.user ? req.user.email : null
+      logWarehouse,
+      logOperatorEmail
     ];
 
     const [result] = await db.query(query, values);

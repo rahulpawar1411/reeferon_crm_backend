@@ -11,6 +11,8 @@ const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
 const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAccessScope } = require('../utils/pagination');
 const { handleControllerError } = require('../utils/errorHandler');
+const { validateInwardCreate, validateInwardUpdate } = require('../validators/inwardValidator');
+const { resolveLogAttribution } = require('../utils/logAttribution');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -133,12 +135,13 @@ exports.addInwardLog = async (req, res) => {
     const inward_vehicle_back_side_photo = getPhotoPath('inward_vehicle_back_side_photo');
     const inward_vehicle_back_side_photo_with_material = getPhotoPath('inward_vehicle_back_side_photo_with_material');
 
-    // Required fields check
-    if (!data.inward_entry_date || !data.inward_vehicle_no || !data.inward_client_name) {
-      return res.status(400).json({ error: 'Date, Vehicle No, and Client Name are required.' });
+    const validationError = validateInwardCreate(data, files);
+    if (validationError) {
+      return res.status(400).json(validationError);
     }
 
     const localTimestamp = formatDateTime(new Date());
+    const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, data);
 
     let startWithDate = data.inward_unloading_start_time || null;
     if (data.inward_entry_date && data.inward_unloading_start_time) {
@@ -229,8 +232,8 @@ exports.addInwardLog = async (req, res) => {
       inward_damage_boxes_photo,
       localTimestamp,
       localTimestamp,
-      req.user ? req.user.warehouse_name : null,
-      req.user ? req.user.email : null
+      logWarehouse,
+      logOperatorEmail
     ];
 
     const [result] = await db.query(query, values);
@@ -496,6 +499,11 @@ exports.updateInwardLog = async (req, res) => {
       inward_count_sheet_photo,
       inward_damage_boxes_photo
     };
+
+    const validationError = validateInwardUpdate(updatedValues, files);
+    if (validationError) {
+      return res.status(400).json(validationError);
+    }
 
     const inwardFieldMapping = {
       inward_entry_date: 'Entry Date',

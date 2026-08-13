@@ -11,6 +11,7 @@ const exifr = require('exifr');
 const fs = require('fs');
 const { getSavedFilePath } = require('../config/multer');
 const { logActivity, getActorLabel } = require('../utils/logger');
+const { resolveLogAttribution } = require('../utils/logAttribution');
 
 /**
  * Ensure global master has Chamber 1 .. Chamber N (shared numbered list).
@@ -167,17 +168,17 @@ exports.getChambers = async (req, res) => {
       appliedLimit = limit;
 
       // Only bootstrap Chamber 1..N when none exist yet (so DO delete can stick)
-      const [existingAll] = await db.query('SELECT id, name FROM chambers ORDER BY id ASC');
+      const [existingAll] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY id ASC');
       const picked = pickDoChambers(existingAll, limit);
       if (picked.length === 0) {
         await ensureNumberedChambers(limit);
-        const [rows] = await db.query('SELECT id, name FROM chambers ORDER BY id ASC');
+        const [rows] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY id ASC');
         filteredRows = pickDoChambers(rows, limit);
       } else {
         filteredRows = picked;
       }
     } else {
-      const [rows] = await db.query('SELECT id, name FROM chambers ORDER BY name ASC');
+      const [rows] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY name ASC');
       filteredRows = rows;
     }
 
@@ -200,7 +201,7 @@ exports.getAssignments = async (req, res) => {
   try {
     const warehouse_name = req.user ? req.user.warehouse_name : null;
     const query = `
-      SELECT cca.chamber_id, c.name AS chamber_name, cca.client_name
+      SELECT cca.chamber_id, c.name AS chamber_name, cca.client_name, cca.chamber_type
       FROM chamber_client_assignments cca
       JOIN chambers c ON cca.chamber_id = c.id
       WHERE (cca.warehouse_name = ? OR cca.warehouse_name IS NULL) AND cca.status = 'active'
@@ -244,6 +245,7 @@ exports.getAssignments = async (req, res) => {
 exports.addInspection = async (req, res) => {
   try {
     const { operator_name, chamber_id, client_name, entry_date, entry_time, box_temp, box_count, chamber_type, overdue_time, photo_capture_time: bodyCaptureTime, created_at } = req.body;
+    const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, req.body);
     const localTimestamp = formatDateTime(new Date());
 
     // Validation checks
@@ -352,8 +354,8 @@ exports.addInspection = async (req, res) => {
       tempVal,
       operator_name,
       photoUrl,
-      req.user ? req.user.warehouse_name : null,
-      req.user ? req.user.email : null,
+      logWarehouse,
+      logOperatorEmail,
       boxCountVal,
       chamber_type || 'Frozen',
       overdue_time || 'same day',
@@ -491,7 +493,7 @@ exports.deleteInspection = async (req, res) => {
 // 5. Add a new chamber-client assignment locally synced from DO Operator
 exports.addAssignment = async (req, res) => {
   try {
-    const { chamber_id, client_name, remark } = req.body;
+    const { chamber_id, client_name, remark, chamber_type } = req.body;
     const warehouse_name = req.user ? req.user.warehouse_name : null;
 
     if (!chamber_id || !client_name) {
@@ -507,8 +509,8 @@ exports.addAssignment = async (req, res) => {
 
     // Insert or update to active status
     await db.query(
-      "INSERT INTO chamber_client_assignments (chamber_id, client_name, warehouse_name, remark, status) VALUES (?, ?, ?, ?, 'active') ON DUPLICATE KEY UPDATE remark = VALUES(remark), status = 'active'",
-      [chamber_id, client_name, warehouse_name, remark || null]
+      "INSERT INTO chamber_client_assignments (chamber_id, client_name, warehouse_name, remark, chamber_type, status) VALUES (?, ?, ?, ?, ?, 'active') ON DUPLICATE KEY UPDATE remark = VALUES(remark), chamber_type = VALUES(chamber_type), status = 'active'",
+      [chamber_id, client_name, warehouse_name, remark || null, chamber_type || 'Frozen']
     );
 
     // Write Activity Log
@@ -595,9 +597,10 @@ exports.deleteAssignment = async (req, res) => {
 // 7. Create a chamber (DO within chamber_limit, or Super Admin)
 exports.createChamber = async (req, res) => {
   try {
-    let { name, remark } = req.body;
+    let { name, remark, chamber_type } = req.body;
     name = (name || '').trim();
     remark = (remark || '').trim();
+    chamber_type = (chamber_type || 'Frozen').trim();
 
     if (req.user && req.user.role === 'do_operator') {
       let limit = 4;
@@ -630,7 +633,7 @@ exports.createChamber = async (req, res) => {
         });
       }
 
-      let [existing] = await db.query('SELECT id, name FROM chambers ORDER BY id ASC');
+      let [existing] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY id ASC');
       const existingByName = existing.find(
         (c) => String(c.name || '').toLowerCase() === name.toLowerCase()
       );
@@ -663,7 +666,8 @@ exports.createChamber = async (req, res) => {
           message: 'Chamber already assigned.',
           data: {
             id: existingByName.id,
-            name: existingByName.name
+            name: existingByName.name,
+            chamber_type: existingByName.chamber_type
           },
           chamber_limit: limit
         });
@@ -682,8 +686,8 @@ exports.createChamber = async (req, res) => {
         } catch (_) {}
       }
 
-      const [result] = await db.query('INSERT INTO chambers (name) VALUES (?)', [name]);
-      existing = [...existing, { id: result.insertId, name }];
+      const [result] = await db.query('INSERT INTO chambers (name, chamber_type) VALUES (?, ?)', [name, chamber_type]);
+      existing = [...existing, { id: result.insertId, name, chamber_type }];
       await ensureIncluded(result.insertId);
 
       try {
@@ -704,12 +708,12 @@ exports.createChamber = async (req, res) => {
       return res.status(201).json({
         success: true,
         message: 'Chamber created successfully.',
-        data: { id: result.insertId, name },
+        data: { id: result.insertId, name, chamber_type },
         chamber_limit: limit
       });
     }
 
-    const [existing] = await db.query('SELECT id, name FROM chambers ORDER BY id ASC');
+    const [existing] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY id ASC');
     if (!name) {
       name = `Chamber ${existing.length + 1}`;
     }
@@ -719,7 +723,7 @@ exports.createChamber = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Chamber name already exists.' });
     }
 
-    const [result] = await db.query('INSERT INTO chambers (name) VALUES (?)', [name]);
+    const [result] = await db.query('INSERT INTO chambers (name, chamber_type) VALUES (?, ?)', [name, chamber_type]);
 
     try {
       const email = req.user ? req.user.email : 'system';
@@ -735,7 +739,7 @@ exports.createChamber = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Chamber created successfully.',
-      data: { id: result.insertId, name }
+      data: { id: result.insertId, name, chamber_type }
     });
   } catch (error) {
     return handleControllerError(res, error, {
@@ -755,33 +759,50 @@ exports.updateChamber = async (req, res) => {
     }
 
     const [rows] = await db.query(
-      'SELECT id, name FROM chambers WHERE id = ? LIMIT 1',
+      'SELECT id, name, chamber_type FROM chambers WHERE id = ? LIMIT 1',
       [id]
     );
     if (rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Chamber not found.' });
     }
 
-    let { name } = req.body;
-    if (name === undefined) {
+    let { name, chamber_type } = req.body;
+    if (name === undefined && chamber_type === undefined) {
       return res.status(400).json({ success: false, message: 'No fields to update.' });
     }
-    name = String(name || '').trim();
-    if (!name) {
-      return res.status(400).json({ success: false, message: 'Chamber name cannot be empty.' });
-    }
-    const [dup] = await db.query(
-      'SELECT id FROM chambers WHERE name = ? AND id != ? LIMIT 1',
-      [name, id]
-    );
-    if (dup.length > 0) {
-      return res.status(400).json({ success: false, message: 'Chamber name already exists.' });
+
+    let queryParts = [];
+    let queryParams = [];
+
+    if (name !== undefined) {
+      name = String(name || '').trim();
+      if (!name) {
+        return res.status(400).json({ success: false, message: 'Chamber name cannot be empty.' });
+      }
+      const [dup] = await db.query(
+        'SELECT id FROM chambers WHERE name = ? AND id != ? LIMIT 1',
+        [name, id]
+      );
+      if (dup.length > 0) {
+        return res.status(400).json({ success: false, message: 'Chamber name already exists.' });
+      }
+      queryParts.push('name = ?');
+      queryParams.push(name);
     }
 
-    await db.query('UPDATE chambers SET name = ? WHERE id = ?', [name, id]);
+    if (chamber_type !== undefined) {
+      chamber_type = String(chamber_type || 'Frozen').trim();
+      queryParts.push('chamber_type = ?');
+      queryParams.push(chamber_type);
+    }
+
+    if (queryParts.length > 0) {
+      queryParams.push(id);
+      await db.query(`UPDATE chambers SET ${queryParts.join(', ')} WHERE id = ?`, queryParams);
+    }
 
     const [updated] = await db.query(
-      'SELECT id, name FROM chambers WHERE id = ? LIMIT 1',
+      'SELECT id, name, chamber_type FROM chambers WHERE id = ? LIMIT 1',
       [id]
     );
 
@@ -792,7 +813,7 @@ exports.updateChamber = async (req, res) => {
         email,
         'UPDATE_CHAMBER',
         'Chamber Master',
-        `${actorLabel} updated chamber "${updated[0].name}".`
+        `${actorLabel} updated chamber "${updated[0].name}" (type: ${updated[0].chamber_type}).`
       );
     } catch (_) {}
 
