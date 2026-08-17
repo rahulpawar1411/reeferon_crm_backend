@@ -18,6 +18,9 @@ yarn-debug.log*
 yarn-error.log*
 logs/
 
+# User uploads (photos stored on server — not in git)
+uploads/
+
 # IDE & System files
 .vscode/
 .idea/

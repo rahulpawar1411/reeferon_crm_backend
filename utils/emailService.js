@@ -55,7 +55,7 @@ function buildCredentialsHtml({ fullName, email, password, roleLabel, includeMob
 
   let accessBlock = '';
   if (warehouseName) {
-    accessBlock = `<p>Warehouse / Data Access: ${escapeHtml(warehouseName)} logs only` +
+    accessBlock = `<p>Warehouse / Data Access: ${escapeHtml(warehouseName)}` +
       (chamberLimit ? `<br/>Chambers assigned: 1 to ${escapeHtml(String(chamberLimit))}` : '') +
       `</p>`;
   }
@@ -86,7 +86,7 @@ function buildCredentialsText({ fullName, email, password, roleLabel, includeMob
     ''
   ];
   if (warehouseName) {
-    lines.push(`Warehouse / Data Access: ${warehouseName} logs only`);
+    lines.push(`Warehouse / Data Access: ${warehouseName}`);
     if (chamberLimit) lines.push(`Chambers assigned: 1 to ${chamberLimit}`);
     lines.push('');
   }

@@ -472,66 +472,75 @@ exports.getInventoryReconciliation = async (req, res) => {
     const { search, warehouse } = req.query;
 
     const sql = `
-      SELECT 
-        cw.client_name,
-        cw.warehouse_name,
+      SELECT
+        d.client_name,
+        d.warehouse_name,
+        d.chamber_id,
+        d.chamber_name,
+        d.chamber_type,
         COALESCE(i.total_inward, 0) AS total_inward_boxes,
         COALESCE(o.total_outward, 0) AS total_outward_boxes,
         GREATEST(0, COALESCE(i.total_inward, 0) - COALESCE(o.total_outward, 0)) AS calculated_balance,
         COALESCE(d.last_box_count, 0) AS physical_audit_count,
         d.last_audit_date,
-        d.chamber_name,
         (GREATEST(0, COALESCE(i.total_inward, 0) - COALESCE(o.total_outward, 0)) - COALESCE(d.last_box_count, 0)) AS discrepancy
       FROM (
-        SELECT DISTINCT client_name, warehouse_name FROM (
-          SELECT client_name, warehouse_name FROM daily_chamber_temp_logs WHERE client_name IS NOT NULL AND TRIM(client_name) != ''
-          UNION
-          SELECT inward_client_name AS client_name, warehouse_name FROM inward_temp_logs WHERE inward_client_name IS NOT NULL AND TRIM(inward_client_name) != ''
-          UNION
-          SELECT outward_client_name AS client_name, warehouse_name FROM outward_temp_logs WHERE outward_client_name IS NOT NULL AND TRIM(outward_client_name) != ''
-        ) u
-      ) cw
+        SELECT
+          d1.client_name,
+          d1.warehouse_name,
+          COALESCE(d1.chamber_id, ch.id, chn.id) AS chamber_id,
+          COALESCE(NULLIF(TRIM(d1.chamber_name), ''), ch.name, chn.name) AS chamber_name,
+          COALESCE(
+            NULLIF(NULLIF(TRIM(ch.chamber_type), ''), 'Other'),
+            NULLIF(NULLIF(TRIM(chn.chamber_type), ''), 'Other'),
+            NULLIF(NULLIF(TRIM(cca.chamber_type), ''), 'Other'),
+            NULLIF(NULLIF(TRIM(d1.chamber_type), ''), 'Other'),
+            'Frozen'
+          ) AS chamber_type,
+          d1.box_count AS last_box_count,
+          d1.entry_date AS last_audit_date
+        FROM daily_chamber_temp_logs d1
+        INNER JOIN (
+          SELECT MAX(id) AS max_id
+          FROM daily_chamber_temp_logs
+          WHERE client_name IS NOT NULL AND TRIM(client_name) != ''
+          GROUP BY
+            client_name,
+            COALESCE(warehouse_name, ''),
+            COALESCE(chamber_id, 0),
+            LOWER(TRIM(COALESCE(chamber_name, '')))
+        ) pick ON d1.id = pick.max_id
+        LEFT JOIN chambers ch ON ch.id = d1.chamber_id
+        LEFT JOIN chambers chn
+          ON (d1.chamber_id IS NULL OR d1.chamber_id = 0)
+         AND LOWER(TRIM(chn.name)) = LOWER(TRIM(d1.chamber_name))
+        LEFT JOIN chamber_client_assignments cca
+          ON cca.status = 'active'
+         AND LOWER(TRIM(cca.client_name)) = LOWER(TRIM(d1.client_name))
+         AND cca.chamber_id = COALESCE(d1.chamber_id, ch.id, chn.id)
+      ) d
       LEFT JOIN (
         SELECT inward_client_name, warehouse_name, SUM(inward_received_boxes_qty) AS total_inward
         FROM inward_temp_logs
         GROUP BY inward_client_name, warehouse_name
-      ) i ON cw.client_name = i.inward_client_name AND (cw.warehouse_name = i.warehouse_name OR (cw.warehouse_name IS NULL AND i.warehouse_name IS NULL))
+      ) i ON d.client_name = i.inward_client_name AND (d.warehouse_name = i.warehouse_name OR (d.warehouse_name IS NULL AND i.warehouse_name IS NULL))
       LEFT JOIN (
         SELECT outward_client_name, warehouse_name, SUM(outward_received_boxes_qty) AS total_outward
         FROM outward_temp_logs
         GROUP BY outward_client_name, warehouse_name
-      ) o ON cw.client_name = o.outward_client_name AND (cw.warehouse_name = o.warehouse_name OR (cw.warehouse_name IS NULL AND o.warehouse_name IS NULL))
-      LEFT JOIN (
-        SELECT d1.client_name, d1.warehouse_name, d1.box_count AS last_box_count,
-               d1.entry_date AS last_audit_date, d1.chamber_name
-        FROM daily_chamber_temp_logs d1
-        INNER JOIN (
-          SELECT t.client_name, t.warehouse_name, MAX(t.id) AS max_id
-          FROM daily_chamber_temp_logs t
-          INNER JOIN (
-            SELECT client_name, warehouse_name, MAX(entry_date) AS max_date
-            FROM daily_chamber_temp_logs
-            GROUP BY client_name, warehouse_name
-          ) latest
-            ON t.client_name = latest.client_name
-           AND (
-             t.warehouse_name = latest.warehouse_name
-             OR (t.warehouse_name IS NULL AND latest.warehouse_name IS NULL)
-           )
-           AND t.entry_date = latest.max_date
-          GROUP BY t.client_name, t.warehouse_name
-        ) pick ON d1.id = pick.max_id
-      ) d ON cw.client_name = d.client_name AND (cw.warehouse_name = d.warehouse_name OR (cw.warehouse_name IS NULL AND d.warehouse_name IS NULL))
+      ) o ON d.client_name = o.outward_client_name AND (d.warehouse_name = o.warehouse_name OR (d.warehouse_name IS NULL AND o.warehouse_name IS NULL))
     `;
 
     const [rows] = await db.query(sql);
 
-    // One lot per client + warehouse (never Morning + Evening as two lots)
+    // One lot per client + chamber + warehouse (never Morning + Evening as two lots)
     const lotMap = new Map();
     for (const r of rows || []) {
       const key = `${String(r.client_name || '')
         .trim()
         .toLowerCase()}|||${String(r.warehouse_name || '')
+        .trim()
+        .toLowerCase()}|||${r.chamber_id != null ? Number(r.chamber_id) : ''}|||${String(r.chamber_name || '')
         .trim()
         .toLowerCase()}`;
       if (!lotMap.has(key)) lotMap.set(key, r);
@@ -561,7 +570,8 @@ exports.getInventoryReconciliation = async (req, res) => {
       filteredRows = filteredRows.filter(r => 
         (r.client_name && r.client_name.toLowerCase().includes(searchLower)) ||
         (r.warehouse_name && r.warehouse_name.toLowerCase().includes(searchLower)) ||
-        (r.chamber_name && r.chamber_name.toLowerCase().includes(searchLower))
+        (r.chamber_name && r.chamber_name.toLowerCase().includes(searchLower)) ||
+        (r.chamber_type && r.chamber_type.toLowerCase().includes(searchLower))
       );
     }
 

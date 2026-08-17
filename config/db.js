@@ -758,6 +758,40 @@ async function testDbConnection() {
       console.warn('⚠️ Failed to migrate chamber_id column:', colErr.message);
     }
 
+    // Auto migration: photo capture GPS on chamber daily logs
+    try {
+      const [chamberCols] = await pool.query('SHOW COLUMNS FROM daily_chamber_temp_logs');
+      const chamberColNames = chamberCols.map((c) => c.Field);
+      if (!chamberColNames.includes('photo_capture_latitude')) {
+        await pool.query('ALTER TABLE daily_chamber_temp_logs ADD COLUMN photo_capture_latitude DECIMAL(10,7) DEFAULT NULL');
+        console.log('🌱 Added photo_capture_latitude to daily_chamber_temp_logs.');
+      }
+      if (!chamberColNames.includes('photo_capture_longitude')) {
+        await pool.query('ALTER TABLE daily_chamber_temp_logs ADD COLUMN photo_capture_longitude DECIMAL(10,7) DEFAULT NULL');
+        console.log('🌱 Added photo_capture_longitude to daily_chamber_temp_logs.');
+      }
+      if (!chamberColNames.includes('photo_capture_accuracy')) {
+        await pool.query('ALTER TABLE daily_chamber_temp_logs ADD COLUMN photo_capture_accuracy DECIMAL(8,2) DEFAULT NULL');
+        console.log('🌱 Added photo_capture_accuracy to daily_chamber_temp_logs.');
+      }
+    } catch (colErr) {
+      console.warn('⚠️ Failed to migrate chamber photo GPS columns:', colErr.message);
+    }
+
+    // Auto migration: per-photo capture time + GPS JSON on inward/outward logs
+    for (const table of ['inward_temp_logs', 'outward_temp_logs']) {
+      try {
+        const [columns] = await pool.query(`SHOW COLUMNS FROM ${table}`);
+        const colNames = columns.map((c) => c.Field);
+        if (!colNames.includes('photo_capture_metadata')) {
+          await pool.query(`ALTER TABLE ${table} ADD COLUMN photo_capture_metadata LONGTEXT DEFAULT NULL`);
+          console.log(`🌱 Added photo_capture_metadata to ${table}.`);
+        }
+      } catch (colErr) {
+        console.warn(`⚠️ Failed to migrate photo_capture_metadata on ${table}:`, colErr.message);
+      }
+    }
+
 
     // Log successful server startup process
     try {

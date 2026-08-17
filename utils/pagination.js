@@ -84,14 +84,31 @@ function appendWarehouseFilter(conditions, params, query, user) {
   }
 }
 
-/** Optional client filter for Customer / Super Admin list views. */
+/** Optional client filter (SA / Customer / DO). */
 function appendClientFilter(conditions, params, query, user) {
   const client = query.client;
   if (!client || client === 'All') return;
   const role = user?.role === 'sub_admin' ? 'customer' : user?.role;
-  if (!user || (role !== 'super_admin' && role !== 'customer')) return;
+  if (!user || (role !== 'super_admin' && role !== 'customer' && role !== 'do_operator')) return;
   conditions.push('LOWER(TRIM(COALESCE(client_name, \'\'))) = ?');
   params.push(String(client).trim().toLowerCase());
+}
+
+/** Optional chamber filter so same client on two chambers does not mix. */
+function appendChamberFilter(conditions, params, query) {
+  const chamberId = query.chamber_id;
+  if (chamberId != null && String(chamberId).trim() !== '' && String(chamberId).toLowerCase() !== 'all') {
+    const id = parseInt(chamberId, 10);
+    if (Number.isFinite(id)) {
+      conditions.push('chamber_id = ?');
+      params.push(id);
+      return;
+    }
+  }
+  const chamber = query.chamber || query.chamber_name;
+  if (!chamber || chamber === 'All') return;
+  conditions.push('LOWER(TRIM(COALESCE(chamber_name, \'\'))) = ?');
+  params.push(String(chamber).trim().toLowerCase());
 }
 
 module.exports = {
@@ -100,5 +117,6 @@ module.exports = {
   parseCsvNames,
   appendSubAdminAccessScope,
   appendWarehouseFilter,
-  appendClientFilter
+  appendClientFilter,
+  appendChamberFilter
 };

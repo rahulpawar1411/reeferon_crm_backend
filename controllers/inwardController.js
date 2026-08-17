@@ -13,6 +13,7 @@ const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAcc
 const { handleControllerError } = require('../utils/errorHandler');
 const { validateInwardCreate, validateInwardUpdate } = require('../validators/inwardValidator');
 const { resolveLogAttribution } = require('../utils/logAttribution');
+const { parsePhotoCaptureMetadata, serializePhotoCaptureMetadata } = require('../utils/photoCaptureMeta');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -81,7 +82,7 @@ exports.getInwardLogs = async (req, res) => {
              inward_short_received_boxes_qty, inward_excess_received_boxes_qty, inward_damage_received_boxes_qty, 
              inward_material_type, inward_unloading_supervisor_name, inward_remarks, inward_invoice_photos, inward_pod_photo,
              inward_vehicle_seal_photo, inward_vehicle_temp_photo, inward_material_temp_photo, inward_vehicle_back_side_photo, 
-             inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo, update_details, update_count, inward_created_at, inward_updated_at, warehouse_name, operator_email
+             inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo, photo_capture_metadata, update_details, update_count, inward_created_at, inward_updated_at, warehouse_name, operator_email
       FROM inward_temp_logs 
       ${whereClause}
       ORDER BY inward_entry_date DESC, inward_id DESC
@@ -142,6 +143,9 @@ exports.addInwardLog = async (req, res) => {
 
     const localTimestamp = formatDateTime(new Date());
     const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, data);
+    const photo_capture_metadata = serializePhotoCaptureMetadata(
+      parsePhotoCaptureMetadata(data.photo_capture_metadata)
+    );
 
     let startWithDate = data.inward_unloading_start_time || null;
     if (data.inward_entry_date && data.inward_unloading_start_time) {
@@ -191,8 +195,8 @@ exports.addInwardLog = async (req, res) => {
         inward_damage_received_boxes_qty, inward_material_type, inward_unloading_supervisor_name, inward_remarks, 
         inward_invoice_photos, inward_pod_photo, inward_vehicle_seal_photo, inward_vehicle_temp_photo, 
         inward_material_temp_photo, inward_vehicle_back_side_photo, inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo,
-        inward_created_at, inward_updated_at, warehouse_name, operator_email
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        inward_created_at, inward_updated_at, warehouse_name, operator_email, photo_capture_metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const values = [
@@ -233,7 +237,8 @@ exports.addInwardLog = async (req, res) => {
       localTimestamp,
       localTimestamp,
       logWarehouse,
-      logOperatorEmail
+      logOperatorEmail,
+      photo_capture_metadata
     ];
 
     const [result] = await db.query(query, values);

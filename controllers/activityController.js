@@ -36,22 +36,24 @@ exports.getActivityLogs = async (req, res) => {
       conditions.push(`(
         a.action IN (
           'ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT',
-          'ADD_CHAMBER', 'DELETE_CHAMBER',
+          'ADD_CHAMBER', 'DELETE_CHAMBER', 'UPDATE_CHAMBER', 'UPDATE_CHAMBER_ZONE',
+          'MASTER_SETUP',
           'REQUEST_EDIT', 'REQUEST_DELETE',
           'GRANT_PERMISSION', 'GRANT_DELETE',
           'DENY_PERMISSION', 'DENY_DELETE',
           'USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION'
         )
-        OR a.log_type IN ('DO_CHANGE', 'ChamberMaster', 'ClientMaster', 'MasterSetup')
+        OR a.log_type IN ('DO_CHANGE', 'ChamberMaster', 'ClientMaster', 'MasterSetup', 'ChamberType')
         OR (a.log_type = 'Chamber Client Assignment' AND a.action IN ('CREATE', 'DELETE', 'ADD_CLIENT', 'DELETE_CLIENT'))
       )`);
     } else {
       // Operator activity trail (exclude security / system / error / DO master & permission rows)
       conditions.push(`(
-        (a.log_type IS NULL OR a.log_type NOT IN ('PERMISSION', 'SECURITY', 'ERROR', 'SYSTEM', 'DO_CHANGE', 'ChamberMaster', 'ClientMaster', 'MasterSetup'))
+        (a.log_type IS NULL OR a.log_type NOT IN ('PERMISSION', 'SECURITY', 'ERROR', 'SYSTEM', 'DO_CHANGE', 'ChamberMaster', 'ClientMaster', 'MasterSetup', 'ChamberType'))
         AND (a.action IS NULL OR a.action NOT IN (
           'SYSTEM_ERROR',
           'ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT', 'ADD_CHAMBER', 'DELETE_CHAMBER',
+          'UPDATE_CHAMBER', 'UPDATE_CHAMBER_ZONE', 'MASTER_SETUP',
           'REQUEST_EDIT', 'REQUEST_DELETE',
           'GRANT_PERMISSION', 'GRANT_DELETE',
           'DENY_PERMISSION', 'DENY_DELETE',
@@ -64,6 +66,16 @@ exports.getActivityLogs = async (req, res) => {
     if (action && action !== 'All') {
       conditions.push('a.action = ?');
       params.push(String(action));
+    }
+
+    const operatorEmailFilter = String(req.query.operatorEmail || req.query.operator_email || '').trim();
+    if (operatorEmailFilter) {
+      conditions.push(`(
+        LOWER(TRIM(a.operator_email)) = LOWER(TRIM(?))
+        AND a.operator_email IS NOT NULL
+        AND TRIM(a.operator_email) != ''
+      )`);
+      params.push(operatorEmailFilter);
     }
 
     if (fromDate) {
@@ -80,11 +92,12 @@ exports.getActivityLogs = async (req, res) => {
       conditions.push(`(
         a.operator_email LIKE ?
         OR a.description LIKE ?
+        OR a.remark LIKE ?
         OR a.action LIKE ?
         OR a.log_type LIKE ?
         OR op.full_name LIKE ?
       )`);
-      params.push(q, q, q, q, q);
+      params.push(q, q, q, q, q, q);
     }
 
     // Warehouse filter (activity tab only; matches prior UI behaviour)
@@ -148,7 +161,8 @@ exports.createActivityLog = async (req, res) => {
 
     const masterActions = [
       'ADD_CLIENT', 'DELETE_CLIENT', 'UPDATE_CLIENT',
-      'ADD_CHAMBER', 'DELETE_CHAMBER',
+      'ADD_CHAMBER', 'DELETE_CHAMBER', 'UPDATE_CHAMBER', 'UPDATE_CHAMBER_ZONE',
+      'MASTER_SETUP',
       'REQUEST_EDIT', 'REQUEST_DELETE'
     ];
     if (masterActions.includes(String(action)) && (!log_type || log_type === 'activity')) {

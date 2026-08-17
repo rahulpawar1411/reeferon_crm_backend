@@ -14,6 +14,7 @@ const {
   sendPaginated,
   appendWarehouseFilter,
   appendClientFilter,
+  appendChamberFilter,
   appendSubAdminAccessScope
 } = require('../utils/pagination');
 const { logErrorCheckpoint } = require('../utils/errorHandler');
@@ -22,6 +23,7 @@ const {
   hasActivePermission,
   consumeGrantedPermission
 } = require('./permissionController');
+const { parseOptionalFloat } = require('../utils/photoCaptureMeta');
 
 let memoryChamberLogs = [];
 
@@ -114,6 +116,7 @@ exports.getChamberLogs = async (req, res) => {
 
     appendWarehouseFilter(conditions, params, req.query, req.user);
     appendClientFilter(conditions, params, req.query, req.user);
+    appendChamberFilter(conditions, params, req.query);
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -123,7 +126,7 @@ exports.getChamberLogs = async (req, res) => {
     );
     const total = countRows[0]?.total ?? 0;
 
-    const query = `SELECT id, reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, box_temp AS chamber_temp, box_count, overdue_time, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email, chamber_type, shift, chamber_id, is_native, remarks FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC LIMIT ? OFFSET ?`;
+    const query = `SELECT id, reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, box_temp AS chamber_temp, box_count, overdue_time, monitor_supervisor_name, temp_sensor_image, photo_capture_time, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, time_variance_minutes, update_details, update_count, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email, chamber_type, shift, chamber_id, is_native, remarks FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC LIMIT ? OFFSET ?`;
 
     const [rows] = await db.query(query, [...params, limit, offset]);
     return sendPaginated(res, rows, total, page, limit);
@@ -229,11 +232,14 @@ exports.addChamberLog = async (req, res) => {
     };
     const shiftVal = resolveShift(req.body.shift, inspection_time);
     const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, req.body);
+    const photo_capture_latitude = parseOptionalFloat(req.body.photo_capture_latitude);
+    const photo_capture_longitude = parseOptionalFloat(req.body.photo_capture_longitude);
+    const photo_capture_accuracy = parseOptionalFloat(req.body.photo_capture_accuracy);
 
     const query = `
       INSERT INTO daily_chamber_temp_logs 
-      (entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, created_at, updated_at, warehouse_name, operator_email, shift, chamber_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, created_at, updated_at, warehouse_name, operator_email, shift, chamber_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const values = [
       entry_date, 
@@ -245,6 +251,9 @@ exports.addChamberLog = async (req, res) => {
       temp_sensor_image,
       photo_capture_time,
       time_variance_minutes,
+      photo_capture_latitude,
+      photo_capture_longitude,
+      photo_capture_accuracy,
       localTimestamp,
       localTimestamp,
       logWarehouse,
@@ -322,11 +331,14 @@ exports.updateChamberLog = async (req, res) => {
       }
     }
 
-    const [existingRows] = await db.query('SELECT reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, update_details, update_count, chamber_type FROM daily_chamber_temp_logs WHERE id = ?', [id]);
+    const [existingRows] = await db.query('SELECT reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, update_details, update_count, chamber_type FROM daily_chamber_temp_logs WHERE id = ?', [id]);
     
     let temp_sensor_image = req.body.temp_sensor_image;
     let photo_capture_time = null;
     let time_variance_minutes = 0;
+    let photo_capture_latitude = null;
+    let photo_capture_longitude = null;
+    let photo_capture_accuracy = null;
     let update_details = null;
     let update_count = 0;
 
@@ -335,32 +347,57 @@ exports.updateChamberLog = async (req, res) => {
       if (!temp_sensor_image) {
         temp_sensor_image = current.temp_sensor_image;
       }
-      photo_capture_time = current.photo_capture_time;
+      photo_capture_time = req.body.photo_capture_time || current.photo_capture_time;
       time_variance_minutes = current.time_variance_minutes;
+      photo_capture_latitude = parseOptionalFloat(req.body.photo_capture_latitude);
+      if (photo_capture_latitude == null && current.photo_capture_latitude != null) {
+        photo_capture_latitude = parseOptionalFloat(current.photo_capture_latitude);
+      }
+      photo_capture_longitude = parseOptionalFloat(req.body.photo_capture_longitude);
+      if (photo_capture_longitude == null && current.photo_capture_longitude != null) {
+        photo_capture_longitude = parseOptionalFloat(current.photo_capture_longitude);
+      }
+      photo_capture_accuracy = parseOptionalFloat(req.body.photo_capture_accuracy);
+      if (photo_capture_accuracy == null && current.photo_capture_accuracy != null) {
+        photo_capture_accuracy = parseOptionalFloat(current.photo_capture_accuracy);
+      }
       
       const mergedEntryDate = entry_date || current.entry_date;
       const mergedInspectionTime = inspection_time || current.inspection_time;
 
       if (req.file) {
         temp_sensor_image = getSavedFilePath(req.file, 'daily_temp_monitor_images');
-        try {
-          if (req.file.path && /^https?:\/\//i.test(req.file.path)) {
+        if (req.body.photo_capture_time) {
+          photo_capture_time = req.body.photo_capture_time;
+        } else {
+          try {
+            if (req.file.path && /^https?:\/\//i.test(req.file.path)) {
+              const now = new Date();
+              photo_capture_time = formatDateTime(now);
+            } else {
+              const exif = await exifr.parse(req.file.path);
+              if (exif && exif.DateTimeOriginal) {
+                const captureDate = exif.DateTimeOriginal;
+                photo_capture_time = formatDateTime(captureDate);
+              } else {
+                const stats = fs.statSync(req.file.path);
+                const fileTime = stats.birthtime || stats.mtime;
+                photo_capture_time = formatDateTime(fileTime);
+              }
+            }
+          } catch (e) {
             const now = new Date();
             photo_capture_time = formatDateTime(now);
-          } else {
-            const exif = await exifr.parse(req.file.path);
-            if (exif && exif.DateTimeOriginal) {
-              const captureDate = exif.DateTimeOriginal;
-              photo_capture_time = formatDateTime(captureDate);
-            } else {
-              const stats = fs.statSync(req.file.path);
-              const fileTime = stats.birthtime || stats.mtime;
-              photo_capture_time = formatDateTime(fileTime);
-            }
           }
-        } catch (e) {
-          const now = new Date();
-          photo_capture_time = formatDateTime(now);
+        }
+        if (req.body.photo_capture_latitude != null) {
+          photo_capture_latitude = parseOptionalFloat(req.body.photo_capture_latitude);
+        }
+        if (req.body.photo_capture_longitude != null) {
+          photo_capture_longitude = parseOptionalFloat(req.body.photo_capture_longitude);
+        }
+        if (req.body.photo_capture_accuracy != null) {
+          photo_capture_accuracy = parseOptionalFloat(req.body.photo_capture_accuracy);
         }
       }
 
@@ -421,6 +458,9 @@ exports.updateChamberLog = async (req, res) => {
         temp_sensor_image = COALESCE(?, temp_sensor_image),
         photo_capture_time = ?,
         time_variance_minutes = ?,
+        photo_capture_latitude = COALESCE(?, photo_capture_latitude),
+        photo_capture_longitude = COALESCE(?, photo_capture_longitude),
+        photo_capture_accuracy = COALESCE(?, photo_capture_accuracy),
         update_details = ?,
         update_count = ?,
         remarks = ?,
@@ -439,6 +479,9 @@ exports.updateChamberLog = async (req, res) => {
       temp_sensor_image,
       photo_capture_time,
       time_variance_minutes,
+      photo_capture_latitude,
+      photo_capture_longitude,
+      photo_capture_accuracy,
       update_details || null,
       update_count,
       remarks || null,

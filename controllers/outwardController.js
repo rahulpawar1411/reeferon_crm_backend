@@ -12,6 +12,7 @@ const { buildDiffString } = require('../utils/diffBuilder');
 const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAccessScope } = require('../utils/pagination');
 const { handleControllerError } = require('../utils/errorHandler');
 const { resolveLogAttribution } = require('../utils/logAttribution');
+const { parsePhotoCaptureMetadata, serializePhotoCaptureMetadata } = require('../utils/photoCaptureMeta');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -80,7 +81,7 @@ exports.getOutwardLogs = async (req, res) => {
              outward_short_received_boxes_qty, outward_excess_received_boxes_qty, outward_damage_received_boxes_qty, 
              outward_material_type, outward_loading_supervisor_name, outward_remarks, outward_invoice_photos, outward_pod_photo,
              outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_pre_vehicle_temp_photo, outward_material_temp_photo, outward_vehicle_back_side_photo, 
-             outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, update_details, update_count, outward_created_at, outward_updated_at, warehouse_name, operator_email
+             outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, photo_capture_metadata, update_details, update_count, outward_created_at, outward_updated_at, warehouse_name, operator_email
       FROM outward_temp_logs 
       ${whereClause}
       ORDER BY outward_entry_date DESC, outward_id DESC
@@ -142,6 +143,9 @@ exports.addOutwardLog = async (req, res) => {
 
     const localTimestamp = formatDateTime(new Date());
     const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, data);
+    const photo_capture_metadata = serializePhotoCaptureMetadata(
+      parsePhotoCaptureMetadata(data.photo_capture_metadata)
+    );
 
     let startWithDate = data.outward_loading_start_time || null;
     if (data.outward_entry_date && data.outward_loading_start_time) {
@@ -195,8 +199,8 @@ exports.addOutwardLog = async (req, res) => {
         outward_damage_received_boxes_qty, outward_material_type, outward_loading_supervisor_name, outward_remarks, 
         outward_invoice_photos, outward_pod_photo, outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_pre_vehicle_temp_photo, 
         outward_material_temp_photo, outward_vehicle_back_side_photo, outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo,
-        outward_created_at, outward_updated_at, warehouse_name, operator_email
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        outward_created_at, outward_updated_at, warehouse_name, operator_email, photo_capture_metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const values = [
@@ -239,7 +243,8 @@ exports.addOutwardLog = async (req, res) => {
       localTimestamp,
       localTimestamp,
       logWarehouse,
-      logOperatorEmail
+      logOperatorEmail,
+      photo_capture_metadata
     ];
 
     const [result] = await db.query(query, values);

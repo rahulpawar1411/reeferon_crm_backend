@@ -10,6 +10,8 @@ const db = require('../config/db');
 const { logActivity, extractRemark, getActorLabel } = require('../utils/logger');
 const { handleControllerError } = require('../utils/errorHandler');
 
+const PERMISSION_LOG_TYPES = "('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster', 'ChamberType')";
+
 /**
  * On Super Admin approve of Chamber Add: create chamber (if needed) and raise DO chamber_limit
  * so Registered Operators Directory + mobile GET /api/chambers stay in sync.
@@ -84,6 +86,59 @@ async function applyApprovedChamberAdd(operatorEmail, requestDescription, record
   };
 }
 
+/**
+ * On Super Admin allow of chamber type: apply Frozen/Chilled/Dry immediately.
+ */
+async function applyApprovedChamberTypeChange(requestDescription, recordId) {
+  const desc = String(requestDescription || '');
+  const fromTo = desc.match(/from\s+([A-Za-z]+)\s+to\s+([A-Za-z]+)/i);
+  const nextRaw = String(fromTo?.[2] || '').trim();
+  const allowed = ['Frozen', 'Chilled', 'Dry', 'Other'];
+  const nextType = allowed.find((t) => t.toLowerCase() === nextRaw.toLowerCase());
+  const id = parseInt(recordId, 10);
+  if (!nextType || !id) {
+    return { ok: false, reason: 'missing_type' };
+  }
+
+  const [rows] = await db.query(
+    'SELECT id, name, chamber_type FROM chambers WHERE id = ? LIMIT 1',
+    [id]
+  );
+  if (!rows.length) {
+    return { ok: false, reason: 'not_found' };
+  }
+
+  await db.query('UPDATE chambers SET chamber_type = ? WHERE id = ?', [nextType, id]);
+  try {
+    await db.query(
+      "UPDATE chamber_client_assignments SET chamber_type = ? WHERE chamber_id = ? AND status = 'active'",
+      [nextType, id]
+    );
+  } catch (_) {}
+
+  const remarkMatch = desc.match(/Remark:\s*(.+)$/i);
+  try {
+    await logActivity(
+      'system',
+      'UPDATE_CHAMBER_ZONE',
+      'DO_CHANGE',
+      `Super Admin approved chamber type of "${rows[0].name}" to "${nextType}"${
+        remarkMatch?.[1] ? `. Remark: ${remarkMatch[1].trim()}` : ''
+      }.`,
+      id,
+      remarkMatch?.[1]?.trim() || null
+    );
+  } catch (_) {}
+
+  return {
+    ok: true,
+    id,
+    name: rows[0].name,
+    chamber_type: nextType,
+    old_type: rows[0].chamber_type
+  };
+}
+
 // 1. GET ALL OR USER-SPECIFIC PERMISSION REQUESTS
 exports.getPermissionRequests = async (req, res) => {
   try {
@@ -99,26 +154,38 @@ exports.getPermissionRequests = async (req, res) => {
                a.description, a.remark, a.created_at, a.do_action_completed_at,
                r.description AS request_description,
                r.remark AS request_remark,
-               c.chamber_id, c.chamber_name, c.client_name, c.shift, c.entry_date,
+               COALESCE(c.chamber_id, ch_master.id, ch_log.id) AS chamber_id,
+               COALESCE(NULLIF(TRIM(ch_log.name), ''), NULLIF(TRIM(ch_master.name), ''), c.chamber_name) AS chamber_name,
+               c.client_name, c.shift, c.entry_date,
                c.reference_no AS log_reference_no
         FROM do_operator_activities a
-        LEFT JOIN do_operator_activities r ON r.operator_email = a.operator_email 
-          AND r.log_type = a.log_type 
-          AND r.permission_req = a.permission_req
-          AND r.action IN ('REQUEST_EDIT', 'REQUEST_DELETE')
+        LEFT JOIN (
+          SELECT operator_email, log_type, permission_req, MAX(id) AS id
+          FROM do_operator_activities
+          WHERE action IN ('REQUEST_EDIT', 'REQUEST_DELETE')
+          GROUP BY operator_email, log_type, permission_req
+        ) r_latest
+          ON r_latest.operator_email = a.operator_email
+         AND r_latest.log_type = a.log_type
+         AND r_latest.permission_req <=> a.permission_req
+        LEFT JOIN do_operator_activities r ON r.id = r_latest.id
         LEFT JOIN daily_chamber_temp_logs c
           ON a.log_type = 'Chamber' AND c.id = a.permission_req
+        LEFT JOIN chambers ch_master
+          ON a.log_type IN ('ChamberMaster', 'ChamberType') AND ch_master.id = a.permission_req
+        LEFT JOIN chambers ch_log
+          ON a.log_type = 'Chamber' AND ch_log.id = c.chamber_id
     `;
 
     if (req.user.role === 'super_admin' || req.user.role === 'sub_admin') {
       [rows] = await db.query(`
         ${selectCols}
-        WHERE a.log_type IN ('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster')
+        WHERE a.log_type IN ${PERMISSION_LOG_TYPES}
           AND a.id IN (
           SELECT MAX(id)
           FROM do_operator_activities
           WHERE action IN ('REQUEST_EDIT', 'REQUEST_DELETE', 'GRANT_PERMISSION', 'GRANT_DELETE', 'DENY_PERMISSION', 'DENY_DELETE', 'USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION')
-            AND log_type IN ('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster')
+            AND log_type IN ${PERMISSION_LOG_TYPES}
           GROUP BY operator_email, log_type, permission_req
         )
         ORDER BY a.id DESC
@@ -127,19 +194,26 @@ exports.getPermissionRequests = async (req, res) => {
       [rows] = await db.query(`
         ${selectCols}
         WHERE a.operator_email = ?
-          AND a.log_type IN ('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster')
+          AND a.log_type IN ${PERMISSION_LOG_TYPES}
           AND a.id IN (
             SELECT MAX(id)
             FROM do_operator_activities
             WHERE operator_email = ?
               AND action IN ('REQUEST_EDIT', 'REQUEST_DELETE', 'GRANT_PERMISSION', 'GRANT_DELETE', 'DENY_PERMISSION', 'DENY_DELETE', 'USE_EDIT_PERMISSION', 'USE_DELETE_PERMISSION')
-              AND log_type IN ('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster')
+              AND log_type IN ${PERMISSION_LOG_TYPES}
             GROUP BY operator_email, log_type, permission_req
           )
         ORDER BY a.id DESC
       `, [req.user.email, req.user.email]);
     }
-    return res.json(rows);
+    const seen = new Set();
+    const unique = [];
+    for (const row of rows || []) {
+      if (!row || row.id == null || seen.has(row.id)) continue;
+      seen.add(row.id);
+      unique.push(row);
+    }
+    return res.json(unique);
   } catch (err) {
     return handleControllerError(res, err, {
       checkpoint: 'getPermissionRequests',
@@ -177,7 +251,7 @@ exports.createPermissionRequest = async (req, res) => {
           request: { status: 'Pending' } 
         });
       }
-      if (latestAction === grantActionType) {
+      if (latestAction === grantActionType && String(record_type) !== 'ChamberType') {
         return res.status(400).json({ 
           error: `Permission to perform this action has already been granted.`, 
           request: { status: 'Approved' } 
@@ -202,14 +276,23 @@ exports.createPermissionRequest = async (req, res) => {
         reference_no = refRows[0].reference_no;
       }
     }
+    let chamberMasterName = '';
+    if ((record_type === 'ChamberMaster' || record_type === 'ChamberType') && record_id != null) {
+      try {
+        const [chNameRows] = await db.query('SELECT name FROM chambers WHERE id = ? LIMIT 1', [record_id]);
+        chamberMasterName = String(chNameRows[0]?.name || '').trim();
+      } catch (_) {}
+    }
     const refText = reference_no
       ? `Ref: ${reference_no}`
       : (record_type === 'MasterSetup'
         ? 'Master Setup'
         : record_type === 'ChamberMaster'
-          ? `Chamber #${record_id}`
+          ? (chamberMasterName || 'Chamber')
+          : record_type === 'ChamberType'
+            ? (chamberMasterName || 'Chamber type')
           : record_type === 'ClientMaster'
-            ? `ClientMaster #${record_id}`
+            ? 'Client master'
             : `ID: ${record_id}`);
 
     // Insert new request as an activity log row (description + structured remark)
@@ -220,6 +303,8 @@ exports.createPermissionRequest = async (req, res) => {
         ? `Master Setup opened (Super Admin approval not required).`
         : record_type === 'ChamberMaster'
           ? `Requested Super Admin approval for chamber master (${refText}).`
+          : record_type === 'ChamberType'
+            ? `Requested Super Admin allow to EDIT chamber type (${refText}).`
           : record_type === 'ClientMaster'
             ? `Client master ${actionLabel} notified to Super Admin (${refText}) — approval not required.`
             : `Requested permission to ${actionLabel} ${record_type} log (${refText})`);
@@ -311,6 +396,7 @@ exports.updatePermissionRequestStatus = async (req, res) => {
     let clientName = '';
     let shiftName = '';
     let appliedChamberAdd = null;
+    let appliedChamberType = null;
 
     if (record_type === 'Chamber') {
       const [approvalRefRows] = await db.query(
@@ -325,8 +411,9 @@ exports.updatePermissionRequestStatus = async (req, res) => {
         shiftName = approvalRefRows[0].shift || '';
       }
     } else if (record_type === 'ChamberMaster') {
+      const isAddRequest = /allow to ADD chamber/i.test(requestDescription || '');
       // ADD chamber: create on approve + bump DO chamber_limit (Operators Directory + mobile sync)
-      if (status === 'Approved' && isEdit) {
+      if (status === 'Approved' && isEdit && isAddRequest) {
         appliedChamberAdd = await applyApprovedChamberAdd(operator_email, requestDescription, record_id);
         if (appliedChamberAdd?.name) chamberName = appliedChamberAdd.name;
       }
@@ -339,8 +426,27 @@ exports.updatePermissionRequestStatus = async (req, res) => {
           chamberName = chRows[0].name || '';
         } else {
           const nameMatch = String(requestDescription || '').match(/ADD chamber "([^"]+)"/i)
-            || String(requestDescription || '').match(/delete chamber "([^"]+)"/i);
-          chamberName = nameMatch?.[1] || `Chamber #${record_id}`;
+            || String(requestDescription || '').match(/delete chamber "([^"]+)"/i)
+            || String(requestDescription || '').match(/EDIT chamber type "([^"]+)"/i)
+            || String(requestDescription || '').match(/EDIT chamber "([^"]+)"/i);
+          chamberName = nameMatch?.[1] || 'Chamber';
+        }
+      }
+    } else if (record_type === 'ChamberType') {
+      if (status === 'Approved' && isEdit) {
+        appliedChamberType = await applyApprovedChamberTypeChange(requestDescription, record_id);
+        if (appliedChamberType?.name) chamberName = appliedChamberType.name;
+      }
+      if (!chamberName) {
+        const [chRows] = await db.query(
+          'SELECT name FROM chambers WHERE id = ? LIMIT 1',
+          [record_id]
+        );
+        if (chRows.length > 0) {
+          chamberName = chRows[0].name || '';
+        } else {
+          const nameMatch = String(requestDescription || '').match(/EDIT chamber type "([^"]+)"/i);
+          chamberName = nameMatch?.[1] || 'Chamber';
         }
       }
     } else if (record_type === 'ClientMaster') {
@@ -361,11 +467,14 @@ exports.updatePermissionRequestStatus = async (req, res) => {
       if (approvalRefRows.length > 0) approvalRefNo = approvalRefRows[0].reference_no || '';
     }
 
+    const isAddRequest = record_type === 'ChamberMaster' && /allow to ADD chamber/i.test(requestDescription || '');
     const actionWord =
       record_type === 'MasterSetup'
         ? 'Master Setup'
+        : record_type === 'ChamberType'
+          ? 'Chamber Type'
         : record_type === 'ChamberMaster'
-          ? (isEdit ? 'Chamber Add' : 'Chamber Delete')
+          ? (isEdit ? (isAddRequest ? 'Chamber Add' : 'Chamber Edit') : 'Chamber Delete')
           : record_type === 'ClientMaster'
             ? (isEdit ? 'Client Edit' : 'Client Delete')
             : (isEdit ? 'Edit' : 'Delete');
@@ -373,8 +482,16 @@ exports.updatePermissionRequestStatus = async (req, res) => {
     const detailParts =
       record_type === 'MasterSetup'
         ? ['Chambers & Clients management']
+        : record_type === 'ChamberType'
+          ? [
+              'Type change',
+              chamberName || 'Chamber',
+              appliedChamberType?.old_type && appliedChamberType?.chamber_type
+                ? `${appliedChamberType.old_type} → ${appliedChamberType.chamber_type}`
+                : null
+            ].filter(Boolean)
         : record_type === 'ChamberMaster'
-          ? [isEdit ? 'Add chamber' : 'Master delete', chamberName || `#${record_id}`]
+          ? [isEdit ? (isAddRequest ? 'Add chamber' : 'Edit chamber') : 'Master delete', chamberName || 'Chamber']
           : record_type === 'ClientMaster'
             ? [isEdit ? 'Edit client name' : 'Delete client name', `#${record_id}`]
             : [chamberName, clientName, shiftName, approvalRefNo || `#${record_id}`].filter(Boolean);
@@ -408,6 +525,7 @@ exports.updatePermissionRequestStatus = async (req, res) => {
     return res.json({
       message: `Permission request ${status.toLowerCase()} successfully.`,
       chamber_add: appliedChamberAdd || null,
+      chamber_type: appliedChamberType || null,
       remark: storedRemark
     });
   } catch (err) {
@@ -656,7 +774,7 @@ exports.checkPermission = async (req, res) => {
     `, [configKey]);
 
     const isDirectAllowed = configRows.length > 0 && configRows[0].description === 'Allow';
-    if (isDirectAllowed) {
+    if (isDirectAllowed && String(record_type) !== 'ChamberType') {
       return res.json({ approved: true, status: 'Approved' });
     }
 
@@ -749,7 +867,7 @@ exports.hasActivePermission = async (operatorEmail, recordType, recordId, action
      ORDER BY id DESC LIMIT 1`,
     [configKey]
   );
-  if (configRows.length > 0 && configRows[0].description === 'Allow') {
+  if (configRows.length > 0 && configRows[0].description === 'Allow' && String(recordType) !== 'ChamberType') {
     return true;
   }
 

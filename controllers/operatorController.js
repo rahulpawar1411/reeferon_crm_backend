@@ -10,6 +10,15 @@ const { handleControllerError } = require('../utils/errorHandler');
 const { sendOperatorCredentialsEmail } = require('../utils/emailService');
 const { ensureNumberedChambers } = require('./chamberController');
 
+function normalizeIndiaPhone(phone_no) {
+  let digits = String(phone_no || '').replace(/\D/g, '');
+  if (digits.startsWith('91') && digits.length === 12) {
+    digits = digits.slice(2);
+  }
+  if (!/^\d{10}$/.test(digits)) return null;
+  return `+91${digits}`;
+}
+
 /**
  * Keep past + future DO data access aligned with profile warehouse.
  * Updates all logs tagged to this operator email.
@@ -68,6 +77,10 @@ exports.createOperator = async (req, res) => {
     const limitVal = chamber_limit ? parseInt(chamber_limit, 10) : 4;
     const warehouseTrim = String(warehouse_name).trim();
     const emailTrim = String(email).trim().toLowerCase();
+    const phoneTrim = normalizeIndiaPhone(phone_no);
+    if (!phoneTrim) {
+      return res.status(400).json({ error: 'Phone No. must be a 10-digit Indian mobile number.' });
+    }
 
     // Check if operator already exists
     const [existing] = await db.query(
@@ -84,7 +97,7 @@ exports.createOperator = async (req, res) => {
 
     await db.query(
       'INSERT INTO do_operators (email, password, full_name, phone_no, warehouse_name, chamber_limit) VALUES (?, ?, ?, ?, ?, ?)',
-      [emailTrim, hashed, full_name, phone_no, warehouseTrim, limitVal]
+      [emailTrim, hashed, full_name, phoneTrim, warehouseTrim, limitVal]
     );
 
     // Pre-create Chamber 1 .. N so DO sees assigned chambers immediately
@@ -105,7 +118,7 @@ exports.createOperator = async (req, res) => {
       email: emailTrim,
       password,
       full_name,
-      phone_no,
+      phone_no: phoneTrim,
       warehouse_name: warehouseTrim,
       chamber_limit: limitVal
     });
@@ -148,6 +161,10 @@ exports.updateOperator = async (req, res) => {
     const limitVal = chamber_limit ? parseInt(chamber_limit, 10) : 4;
     const warehouseTrim = String(warehouse_name).trim();
     const emailTrim = String(email).trim().toLowerCase();
+    const phoneTrim = normalizeIndiaPhone(phone_no);
+    if (!phoneTrim) {
+      return res.status(400).json({ error: 'Phone No. must be a 10-digit Indian mobile number.' });
+    }
 
     const [beforeRows] = await db.query(
       'SELECT email, warehouse_name FROM do_operators WHERE id = ? LIMIT 1',
@@ -174,12 +191,12 @@ exports.updateOperator = async (req, res) => {
       const hashed = await bcrypt.hash(password, salt);
       await db.query(
         'UPDATE do_operators SET email = ?, password = ?, full_name = ?, phone_no = ?, warehouse_name = ?, chamber_limit = ? WHERE id = ?',
-        [emailTrim, hashed, full_name, phone_no, warehouseTrim, limitVal, id]
+        [emailTrim, hashed, full_name, phoneTrim, warehouseTrim, limitVal, id]
       );
     } else {
       await db.query(
         'UPDATE do_operators SET email = ?, full_name = ?, phone_no = ?, warehouse_name = ?, chamber_limit = ? WHERE id = ?',
-        [emailTrim, full_name, phone_no, warehouseTrim, limitVal, id]
+        [emailTrim, full_name, phoneTrim, warehouseTrim, limitVal, id]
       );
     }
 
