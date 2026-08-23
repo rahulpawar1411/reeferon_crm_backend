@@ -13,13 +13,19 @@ const { getSavedFilePath } = require('../config/multer');
 const { logActivity, getActorLabel } = require('../utils/logger');
 const { resolveLogAttribution } = require('../utils/logAttribution');
 const { parseOptionalFloat } = require('../utils/photoCaptureMeta');
+const {
+  resolveWarehouseByCodeOrName,
+  resolveClientByCodeOrName,
+  resolveWarehouseFields,
+  resolveClientFields
+} = require('../utils/masterResolver');
 
 /**
  * Ensure global master has Chamber 1 .. Chamber N (shared numbered list).
  * Used when Super Admin assigns chamber_limit to a DO.
  */
 async function ensureNumberedChambers(limit) {
-  const n = Math.max(1, Math.min(parseInt(limit, 10) || 4, 50));
+  const n = Math.max(1, Math.min(parseInt(limit, 10) || 4, 500));
   for (let i = 1; i <= n; i++) {
     const name = `Chamber ${i}`;
     const [existing] = await db.query('SELECT id FROM chambers WHERE name = ? LIMIT 1', [name]);
@@ -34,9 +40,7 @@ exports.ensureNumberedChambers = ensureNumberedChambers;
 
 function chamberNumberFromName(name) {
   const m = String(name || '').match(/^Chamber\s+(\d+)$/i);
-  if (m) return parseInt(m[1], 10);
-  const any = String(name || '').match(/(\d+)/);
-  return any ? parseInt(any[1], 10) : null;
+  return m ? parseInt(m[1], 10) : null;
 }
 
 /** DO chamber list: numbered Chamber 1..limit first, then custom names, max `limit`. */
@@ -222,8 +226,23 @@ exports.getAssignments = async (req, res) => {
       ? (req.query.warehouse_name || null)
       : (req.user ? req.user.warehouse_name : null);
     const includeInactive = isSpecialUser;
-    const query = `
-      SELECT cca.chamber_id, c.name AS chamber_name, cca.client_name, cca.warehouse_name,
+
+    // Sub-Admin / Super Admin with no warehouse filter → return all warehouses' assignments
+    const query = warehouse_name == null && isSpecialUser
+      ? `
+      SELECT cca.chamber_id, c.name AS chamber_name, cca.client_name, cca.client_code, cca.warehouse_name, cca.warehouse_code,
+             COALESCE(NULLIF(TRIM(c.chamber_type), ''), NULLIF(TRIM(cca.chamber_type), ''), 'Frozen') AS chamber_type,
+             COALESCE(NULLIF(TRIM(cca.status), ''), 'active') AS status
+      FROM chamber_client_assignments cca
+      JOIN chambers c ON cca.chamber_id = c.id
+      WHERE 1=1
+        ${includeInactive ? '' : "AND cca.status = 'active'"}
+      ORDER BY COALESCE(cca.warehouse_name, ''), c.name ASC,
+               CASE WHEN LOWER(COALESCE(cca.status, 'active')) = 'inactive' THEN 1 ELSE 0 END,
+               cca.client_name ASC
+    `
+      : `
+      SELECT cca.chamber_id, c.name AS chamber_name, cca.client_name, cca.client_code, cca.warehouse_name, cca.warehouse_code,
              COALESCE(NULLIF(TRIM(c.chamber_type), ''), NULLIF(TRIM(cca.chamber_type), ''), 'Frozen') AS chamber_type,
              COALESCE(NULLIF(TRIM(cca.status), ''), 'active') AS status
       FROM chamber_client_assignments cca
@@ -246,7 +265,9 @@ exports.getAssignments = async (req, res) => {
                CASE WHEN LOWER(COALESCE(cca.status, 'active')) = 'inactive' THEN 1 ELSE 0 END,
                cca.client_name ASC
     `;
-    const [rows] = await db.query(query, [warehouse_name, warehouse_name, warehouse_name]);
+    const [rows] = warehouse_name == null && isSpecialUser
+      ? await db.query(query)
+      : await db.query(query, [warehouse_name, warehouse_name, warehouse_name]);
 
     const deduped = [];
     const seen = new Map();
@@ -302,11 +323,22 @@ exports.getAssignments = async (req, res) => {
 exports.addInspection = async (req, res) => {
   try {
     const { operator_name, chamber_id, client_name, entry_date, entry_time, box_temp, box_count, chamber_type, overdue_time, photo_capture_time: bodyCaptureTime, created_at } = req.body;
-    const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, req.body);
+    const { warehouse_name: logWarehouse, warehouse_code: logWarehouseCode, operator_email: logOperatorEmail } = resolveLogAttribution(req, req.body);
     const localTimestamp = formatDateTime(new Date());
+    const whFields = await resolveWarehouseFields({
+      warehouse_code: req.body.warehouse_code || logWarehouseCode,
+      warehouse_name: logWarehouse
+    });
+    const clFields = await resolveClientFields({
+      client_code: req.body.client_code,
+      client_name,
+      warehouse_name: whFields.warehouse_name,
+      warehouse_code: whFields.warehouse_code
+    });
+    const resolvedClientName = clFields.client_name || client_name;
 
     // Validation checks
-    if (!operator_name || !chamber_id || !client_name || !entry_date || !entry_time || box_temp === undefined) {
+    if (!operator_name || !chamber_id || (!client_name && !req.body.client_code) || !entry_date || !entry_time || box_temp === undefined) {
       return res.status(400).json({
         success: false,
         message: 'Operator Name, Chamber ID, Client Name, Date, Time, and Temperature are required.'
@@ -330,7 +362,7 @@ exports.addInspection = async (req, res) => {
     const [existing] = await db.query(
       `SELECT id, reference_no FROM daily_chamber_temp_logs 
        WHERE entry_date = ? AND chamber_name = ? AND client_name = ? AND inspection_time = ? LIMIT 1`,
-      [entry_date, chamber_name, client_name, entry_time]
+      [entry_date, chamber_name, resolvedClientName, entry_time]
     );
     if (existing.length > 0) {
       return res.status(409).json({
@@ -382,8 +414,8 @@ exports.addInspection = async (req, res) => {
 
     const sql = `
       INSERT INTO daily_chamber_temp_logs 
-      (entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, warehouse_name, operator_email, is_native, box_count, chamber_type, overdue_time, photo_capture_time, time_variance_minutes, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, shift, chamber_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (entry_date, client_name, client_code, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, warehouse_name, warehouse_code, operator_email, is_native, box_count, chamber_type, overdue_time, photo_capture_time, time_variance_minutes, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, shift, chamber_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     
     const resolveNativeShift = (shift, entryTime) => {
@@ -405,13 +437,15 @@ exports.addInspection = async (req, res) => {
 
     const params = [
       entry_date,
-      client_name,
+      resolvedClientName,
+      clFields.client_code,
       chamber_name,
       entry_time,
       tempVal,
       operator_name,
       photoUrl,
-      logWarehouse,
+      whFields.warehouse_name,
+      whFields.warehouse_code,
       logOperatorEmail,
       boxCountVal,
       chamber_type || 'Frozen',
@@ -473,6 +507,7 @@ exports.getInspections = async (req, res) => {
         id, 
         entry_date, 
         client_name, 
+        client_code,
         chamber_name, 
         inspection_time, 
         box_temp AS temperature, 
@@ -481,7 +516,8 @@ exports.getInspections = async (req, res) => {
         monitor_supervisor_name,
         temp_sensor_image AS photo_url, 
         temp_sensor_image,
-        warehouse_name, 
+        warehouse_name,
+        warehouse_code,
         operator_email, 
         reference_no, 
         box_count,
@@ -553,18 +589,44 @@ exports.deleteInspection = async (req, res) => {
 // 5. Add a new chamber-client assignment locally synced from DO Operator
 exports.addAssignment = async (req, res) => {
   try {
-    const { chamber_id, client_name, remark, chamber_type, warehouse_name: bodyWarehouse } = req.body;
+    const {
+      chamber_id,
+      client_name,
+      client_code: bodyClientCode,
+      remark,
+      chamber_type,
+      warehouse_name: bodyWarehouse,
+      warehouse_code: bodyWarehouseCode,
+    } = req.body;
     const isSpecialUser = req.user && (req.user.role === 'super_admin' || req.user.role === 'sub_admin');
-    const warehouse_name = isSpecialUser
+    let warehouse_name = isSpecialUser
       ? (bodyWarehouse || null)
       : (req.user ? req.user.warehouse_name : null);
+    let warehouse_code = isSpecialUser ? (bodyWarehouseCode || null) : null;
 
-    if (!chamber_id || !client_name) {
+    if (!chamber_id || (!client_name && !bodyClientCode)) {
       return res.status(400).json({
         success: false,
-        message: 'Chamber ID and Client Name are required.'
+        message: 'Chamber ID and Client Name (or Client Code) are required.'
       });
     }
+
+    const resolvedWarehouse = await resolveWarehouseByCodeOrName({
+      warehouse_code,
+      warehouse_name,
+    });
+    if (resolvedWarehouse) {
+      warehouse_code = resolvedWarehouse.warehouse_code;
+      warehouse_name = resolvedWarehouse.warehouse_name;
+    }
+
+    const resolvedClient = await resolveClientByCodeOrName({
+      client_code: bodyClientCode,
+      client_name,
+      warehouse_name,
+    });
+    const finalClientName = resolvedClient?.client_name || client_name;
+    const finalClientCode = resolvedClient?.client_code || String(bodyClientCode || '').trim() || null;
 
     let resolvedChamberId = chamber_id;
     const chamberRow = await resolveChamberForAssignment(chamber_id);
@@ -577,10 +639,72 @@ exports.addAssignment = async (req, res) => {
     const existingType = String(chamberRows[0]?.chamber_type || '').trim();
     const resolvedType = existingType || requestedType || 'Frozen';
 
+    // Already on server (e.g. SA approved apply) — treat DO re-sync as success, no extra permission.
+    if (req.user?.role === 'do_operator' && finalClientName) {
+      const [existingAssign] = await db.query(
+        `SELECT chamber_id FROM chamber_client_assignments
+         WHERE chamber_id = ?
+           AND LOWER(TRIM(client_name)) = LOWER(TRIM(?))
+           AND (status IS NULL OR status = 'active')
+           AND (
+             (? IS NOT NULL AND TRIM(?) <> '' AND LOWER(TRIM(COALESCE(warehouse_name, ''))) = LOWER(TRIM(?)))
+             OR ((? IS NULL OR TRIM(?) = '') AND (warehouse_name IS NULL OR warehouse_name = ''))
+           )
+         LIMIT 1`,
+        [
+          resolvedChamberId,
+          finalClientName,
+          warehouse_name || null, warehouse_name || '', warehouse_name || '',
+          warehouse_name || null, warehouse_name || ''
+        ]
+      );
+      if (existingAssign.length > 0) {
+        return res.status(200).json({
+          success: true,
+          message: 'Assignment already active.',
+          chamber_type: resolvedType,
+          chamber_name,
+          already_exists: true
+        });
+      }
+    }
+
+    if (req.user?.role === 'do_operator') {
+      const { hasActivePermission, clientMasterPermissionId } = require('./permissionController');
+      const nameForPerm = finalClientName || client_name || bodyClientCode || '';
+      const permIds = [
+        clientMasterPermissionId(resolvedChamberId, 'add', nameForPerm),
+        clientMasterPermissionId(chamber_id, 'add', nameForPerm),
+        clientMasterPermissionId(resolvedChamberId, 'add', client_name || ''),
+        clientMasterPermissionId(chamber_id, 'add', client_name || '')
+      ];
+      let allowed = false;
+      for (const permId of [...new Set(permIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0))]) {
+        if (await hasActivePermission(req.user.email, 'ClientMaster', permId, 'Edit')) {
+          allowed = true;
+          break;
+        }
+      }
+      if (!allowed) {
+        return res.status(403).json({
+          success: false,
+          message: 'Super Admin approval is required before adding this client.'
+        });
+      }
+    }
+
     // Insert or update to active status
     await db.query(
-      "INSERT INTO chamber_client_assignments (chamber_id, client_name, warehouse_name, remark, chamber_type, status) VALUES (?, ?, ?, ?, ?, 'active') ON DUPLICATE KEY UPDATE remark = VALUES(remark), chamber_type = VALUES(chamber_type), status = 'active'",
-      [resolvedChamberId, client_name, warehouse_name, remark || null, resolvedType]
+      `INSERT INTO chamber_client_assignments
+       (chamber_id, client_name, client_code, warehouse_name, warehouse_code, remark, chamber_type, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+       ON DUPLICATE KEY UPDATE
+         client_code = VALUES(client_code),
+         warehouse_code = VALUES(warehouse_code),
+         remark = VALUES(remark),
+         chamber_type = VALUES(chamber_type),
+         status = 'active'`,
+      [resolvedChamberId, finalClientName, finalClientCode, warehouse_name, warehouse_code, remark || null, resolvedType]
     );
 
     const skipActivity = req.body && (req.body.skip_activity === true || req.body.skip_activity === 1 || req.body.skip_activity === 'true');
@@ -598,7 +722,7 @@ exports.addAssignment = async (req, res) => {
           activityEmail,
           'ADD_CLIENT',
           'DO_CHANGE',
-          `${actorLabel}${whLabel} Added client "${client_name}" to ${chamber_name}. Remark: ${resolvedRemark || 'None'}`,
+          `${actorLabel}${whLabel} Added client "${finalClientName}"${finalClientCode ? ` [${finalClientCode}]` : ''} to ${chamber_name}. Remark: ${resolvedRemark || 'None'}`,
           resolvedChamberId,
           resolvedRemark
         );
@@ -627,17 +751,21 @@ exports.deleteAssignment = async (req, res) => {
   try {
     const chamber_id = (req.body && req.body.chamber_id) || (req.query && req.query.chamber_id);
     const client_name = (req.body && req.body.client_name) || (req.query && req.query.client_name);
+    const client_code = (req.body && req.body.client_code) || (req.query && req.query.client_code);
     const remark = (req.body && req.body.remark) || (req.query && req.query.remark);
     const bodyWarehouse = (req.body && req.body.warehouse_name) || (req.query && req.query.warehouse_name);
     const isSpecialUser = req.user && (req.user.role === 'super_admin' || req.user.role === 'sub_admin');
-    const warehouse_name = isSpecialUser
+    let warehouse_name = isSpecialUser
       ? (bodyWarehouse || null)
       : (req.user ? req.user.warehouse_name : null);
+    let warehouse_code = isSpecialUser
+      ? ((req.body && req.body.warehouse_code) || (req.query && req.query.warehouse_code) || null)
+      : null;
 
-    if (!chamber_id || !client_name) {
+    if (!chamber_id || (!client_name && !client_code)) {
       return res.status(400).json({
         success: false,
-        message: 'Chamber ID and Client Name are required.'
+        message: 'Chamber ID and Client Name (or Client Code) are required.'
       });
     }
 
@@ -645,10 +773,50 @@ exports.deleteAssignment = async (req, res) => {
     const resolvedChamberId = chamberRow ? chamberRow.id : chamber_id;
     const chamber_name = chamberRow ? chamberRow.name : `Chamber ${chamber_id}`;
 
+    if (req.user?.role === 'do_operator') {
+      const { hasActivePermission, clientMasterPermissionId } = require('./permissionController');
+      const permId = clientMasterPermissionId(resolvedChamberId, 'delete', client_name || client_code || '');
+      const allowed = await hasActivePermission(req.user.email, 'ClientMaster', permId, 'Delete');
+      if (!allowed) {
+        return res.status(403).json({
+          success: false,
+          message: 'Super Admin approval is required before deleting this client.'
+        });
+      }
+    }
+
+    const resolvedWarehouse = await resolveWarehouseByCodeOrName({
+      warehouse_code,
+      warehouse_name,
+    });
+    if (resolvedWarehouse) {
+      warehouse_code = resolvedWarehouse.warehouse_code;
+      warehouse_name = resolvedWarehouse.warehouse_name;
+    }
+
     // Soft delete mapping in MySQL
     await db.query(
-      "UPDATE chamber_client_assignments SET status = 'inactive', remark = ? WHERE chamber_id = ? AND LOWER(TRIM(client_name)) = LOWER(TRIM(?)) AND (LOWER(TRIM(COALESCE(warehouse_name, ''))) = LOWER(TRIM(COALESCE(?, ''))) OR warehouse_name IS NULL OR warehouse_name = '')",
-      [remark || '', resolvedChamberId, client_name, warehouse_name]
+      `UPDATE chamber_client_assignments
+       SET status = 'inactive', remark = ?
+       WHERE chamber_id = ?
+         AND (
+           (? IS NOT NULL AND TRIM(?) <> '' AND client_code = ?)
+           OR (? IS NULL OR TRIM(?) = '')
+             AND LOWER(TRIM(client_name)) = LOWER(TRIM(?))
+         )
+         AND (
+           (? IS NOT NULL AND TRIM(?) <> '' AND warehouse_code = ?)
+           OR (? IS NULL OR TRIM(?) = '')
+             AND (LOWER(TRIM(COALESCE(warehouse_name, ''))) = LOWER(TRIM(COALESCE(?, ''))) OR warehouse_name IS NULL OR warehouse_name = '')
+         )`,
+      [
+        remark || '',
+        resolvedChamberId,
+        client_code || null, client_code || '', client_code || null,
+        client_code || null, client_code || '', client_name || '',
+        warehouse_code || null, warehouse_code || '', warehouse_code || null,
+        warehouse_code || null, warehouse_code || '', warehouse_name || null
+      ]
     );
 
     const skipActivity = (req.body && (req.body.skip_activity === true || req.body.skip_activity === 1 || req.body.skip_activity === 'true'))
@@ -736,9 +904,9 @@ exports.createChamber = async (req, res) => {
       const ensureIncluded = async (chamberId) => {
         let picked = pickDoChambers(existing, limit);
         if (picked.some((c) => Number(c.id) === Number(chamberId))) return limit;
-        let newLimit = Math.min(50, limit + 1);
+        let newLimit = limit + 1;
         while (
-          newLimit <= 50 &&
+          newLimit <= 500 &&
           !pickDoChambers(existing, newLimit).some((c) => Number(c.id) === Number(chamberId))
         ) {
           newLimit += 1;

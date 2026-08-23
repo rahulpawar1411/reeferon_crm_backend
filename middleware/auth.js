@@ -112,7 +112,7 @@ exports.verifyToken = async (req, res, next) => {
         }
       } else if (decoded.role === 'do_operator') {
         const [rows] = await db.query(
-          'SELECT id, warehouse_name, chamber_limit, full_name, phone_no FROM do_operators WHERE email = ? LIMIT 1',
+          'SELECT id, warehouse_name, warehouse_code, chamber_limit, full_name, phone_no FROM do_operators WHERE email = ? LIMIT 1',
           [decoded.email]
         );
         if (rows.length > 0) {
@@ -120,6 +120,7 @@ exports.verifyToken = async (req, res, next) => {
           decoded.id = rows[0].id;
           // Always prefer live warehouse / limit over stale JWT claims
           if (rows[0].warehouse_name != null) decoded.warehouse_name = rows[0].warehouse_name;
+          if (rows[0].warehouse_code != null) decoded.warehouse_code = rows[0].warehouse_code;
           if (rows[0].chamber_limit != null) decoded.chamber_limit = rows[0].chamber_limit;
           if (rows[0].full_name) decoded.full_name = rows[0].full_name;
           if (rows[0].phone_no) decoded.phone_no = rows[0].phone_no;

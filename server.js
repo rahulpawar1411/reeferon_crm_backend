@@ -226,6 +226,7 @@ const subAdminRoutes = require('./routes/subAdminRoutes');
 const activityRoutes = require('./routes/activityRoutes');
 const permissionRoutes = require('./routes/permissionRoutes');
 const chamberRoutes = require('./routes/chamberRoutes');
+const masterRoutes = require('./routes/masterRoutes');
 
 app.use('/api/auth/login', loginRateLimiter);
 app.use('/api/auth', authRoutes);
@@ -237,11 +238,12 @@ app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'customer', '
 app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberTempRoutes);
 app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), inwardRoutes);
 app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), outwardRoutes);
-app.use('/api/do-operators', verifyToken, requireRole(['super_admin']), operatorRoutes);
+app.use('/api/do-operators', verifyToken, requireRole(['super_admin', 'sub_admin']), operatorRoutes);
 app.use('/api/customers', verifyToken, requireRole(['super_admin']), subAdminRoutes);
 app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), require('./routes/appSubAdminRoutes'));
 app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), activityRoutes);
 app.use('/api/permission-requests', permissionRoutes);
+app.use('/api/masters', verifyToken, requireRole(['super_admin', 'sub_admin']), masterRoutes);
 app.use(
   '/api/customer-reports',
   verifyToken,

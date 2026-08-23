@@ -4,6 +4,8 @@
 // ====================================================================
 
 const db = require('../config/db');
+const { resolveLogAttribution } = require('../utils/logAttribution');
+const { resolveWarehouseFields, resolveClientFields } = require('../utils/masterResolver');
 
 /**
  * 1. GET ALL TEMP LOGS (With optional entry_type filter & search)
@@ -30,9 +32,12 @@ exports.getAllTempLogs = async (req, res) => {
       params.push(pattern, pattern, pattern, pattern, pattern);
     }
 
-    if (req.user && req.user.role === 'do_operator' && req.user.warehouse_name) {
-      sql += ' AND (warehouse_name = ? OR warehouse_name IS NULL)';
-      params.push(req.user.warehouse_name);
+    if (req.user && req.user.role === 'do_operator' && (req.user.warehouse_name || req.user.warehouse_code)) {
+      sql += ' AND (warehouse_name IS NULL OR TRIM(COALESCE(warehouse_name, \'\')) = \'\' OR LOWER(TRIM(COALESCE(warehouse_code, \'\'))) = ? OR LOWER(TRIM(COALESCE(warehouse_name, \'\'))) = ?)';
+      params.push(
+        String(req.user.warehouse_code || '').trim().toLowerCase(),
+        String(req.user.warehouse_name || '').trim().toLowerCase()
+      );
     }
 
     sql += ' ORDER BY recorded_at DESC';
@@ -96,16 +101,30 @@ exports.createTempLog = async (req, res) => {
       status = 'Warning';
     }
 
+    const { warehouse_name: logWarehouse, warehouse_code: logWarehouseCode, operator_email: logOperatorEmail } = resolveLogAttribution(req, req.body);
+    const whFields = await resolveWarehouseFields({
+      warehouse_code: req.body.warehouse_code || logWarehouseCode,
+      warehouse_name: logWarehouse
+    });
+    const clFields = await resolveClientFields({
+      client_code: req.body.client_code,
+      client_name,
+      warehouse_name: whFields.warehouse_name,
+      warehouse_code: whFields.warehouse_code
+    });
+    const resolvedClientName = clFields.client_name || client_name;
+
     const sql = `
       INSERT INTO daily_temp_logs 
-      (entry_type, container_number, client_name, cargo_type, target_temp, actual_temp, temp_variance, status, location_dock, driver_name, driver_phone, seal_number, genset_status, fuel_level, operator_name, remarks, warehouse_name, operator_email)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (entry_type, container_number, client_name, client_code, cargo_type, target_temp, actual_temp, temp_variance, status, location_dock, driver_name, driver_phone, seal_number, genset_status, fuel_level, operator_name, remarks, warehouse_name, warehouse_code, operator_email)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const params = [
       entry_type,
       container_number,
-      client_name,
+      resolvedClientName,
+      clFields.client_code,
       cargo_type || 'Cold Cargo',
       target,
       actual,
@@ -119,8 +138,9 @@ exports.createTempLog = async (req, res) => {
       fuel_level || '100%',
       operator_name || 'Data Operator DO',
       remarks || '',
-      req.user ? req.user.warehouse_name : null,
-      req.user ? req.user.email : null
+      whFields.warehouse_name,
+      whFields.warehouse_code,
+      logOperatorEmail
     ];
 
     const [result] = await db.query(sql, params);

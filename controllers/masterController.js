@@ -1,0 +1,237 @@
+const db = require('../config/db');
+const { handleControllerError } = require('../utils/errorHandler');
+const { generateClientCode } = require('../utils/clientCodeGenerator');
+
+function normalizeCode(value, prefix) {
+  const v = String(value || '').trim().toUpperCase();
+  if (!v) return '';
+  if (prefix && !v.startsWith(`${prefix}-`)) return '';
+  if (!/^[A-Z0-9-]+$/.test(v)) return '';
+  return v;
+}
+
+exports.listWarehouses = async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const activeOnly = String(req.query.active_only || '1') !== '0';
+    const params = [];
+    let where = 'WHERE 1=1';
+    if (activeOnly) where += ' AND is_active = 1';
+    if (q) {
+      where += ' AND (warehouse_code LIKE ? OR warehouse_name LIKE ? OR city LIKE ?)';
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+    }
+    const [rows] = await db.query(
+      `SELECT id, warehouse_code, warehouse_name, city, is_active, created_at, updated_at
+       FROM warehouse_master
+       ${where}
+       ORDER BY is_active DESC, warehouse_name ASC`,
+      params
+    );
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'masters_list_warehouses',
+      req,
+      clientMessage: 'Failed to fetch warehouses.',
+    });
+  }
+};
+
+exports.createWarehouse = async (req, res) => {
+  try {
+    const warehouse_code = normalizeCode(req.body.warehouse_code, 'WH');
+    const warehouse_name = String(req.body.warehouse_name || '').trim();
+    const city = String(req.body.city || '').trim() || null;
+    if (!warehouse_code || !warehouse_name) {
+      return res.status(400).json({ success: false, message: 'Warehouse code and name are required.' });
+    }
+    await db.query(
+      `INSERT INTO warehouse_master (warehouse_code, warehouse_name, city, is_active)
+       VALUES (?, ?, ?, 1)`,
+      [warehouse_code, warehouse_name, city]
+    );
+    return res.status(201).json({ success: true, message: 'Warehouse created successfully.' });
+  } catch (error) {
+    if (String(error.message || '').toLowerCase().includes('duplicate')) {
+      return res.status(409).json({ success: false, message: 'Warehouse code already exists.' });
+    }
+    return handleControllerError(res, error, {
+      checkpoint: 'masters_create_warehouse',
+      req,
+      clientMessage: 'Failed to create warehouse.',
+    });
+  }
+};
+
+exports.updateWarehouse = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ success: false, message: 'Invalid warehouse id.' });
+    const warehouse_name = req.body.warehouse_name != null ? String(req.body.warehouse_name).trim() : null;
+    const city = req.body.city != null ? String(req.body.city).trim() : null;
+    const is_active = req.body.is_active;
+    const sets = [];
+    const params = [];
+    if (warehouse_name != null) {
+      if (!warehouse_name) return res.status(400).json({ success: false, message: 'Warehouse name cannot be empty.' });
+      sets.push('warehouse_name = ?');
+      params.push(warehouse_name);
+    }
+    if (city != null) {
+      sets.push('city = ?');
+      params.push(city || null);
+    }
+    if (is_active !== undefined) {
+      sets.push('is_active = ?');
+      params.push(is_active ? 1 : 0);
+    }
+    if (!sets.length) return res.status(400).json({ success: false, message: 'No fields to update.' });
+    sets.push('updated_at = NOW()');
+    params.push(id);
+    await db.query(`UPDATE warehouse_master SET ${sets.join(', ')} WHERE id = ?`, params);
+    return res.json({ success: true, message: 'Warehouse updated successfully.' });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'masters_update_warehouse',
+      req,
+      clientMessage: 'Failed to update warehouse.',
+    });
+  }
+};
+
+exports.listClients = async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const activeOnly = String(req.query.active_only || '1') !== '0';
+    const warehouseCode = String(req.query.warehouse_code || '').trim();
+    const params = [];
+    let where = 'WHERE 1=1';
+    if (activeOnly) where += ' AND cm.is_active = 1';
+    if (warehouseCode) {
+      where += ' AND wm.warehouse_code = ?';
+      params.push(warehouseCode);
+    }
+    if (q) {
+      where += ' AND (cm.client_code LIKE ? OR cm.client_name LIKE ? OR COALESCE(cm.warehouse_name, \'\') LIKE ?)';
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+    }
+    const [rows] = await db.query(
+      `SELECT cm.id, cm.client_code, cm.client_name, cm.warehouse_name, cm.is_active, cm.created_at, cm.updated_at,
+              wm.warehouse_code
+       FROM client_master cm
+       LEFT JOIN warehouse_master wm
+         ON LOWER(TRIM(wm.warehouse_name)) = LOWER(TRIM(COALESCE(cm.warehouse_name, '')))
+       ${where}
+       ORDER BY cm.is_active DESC, cm.client_name ASC`,
+      params
+    );
+    return res.json({ success: true, data: rows });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'masters_list_clients',
+      req,
+      clientMessage: 'Failed to fetch clients.',
+    });
+  }
+};
+
+exports.createClient = async (req, res) => {
+  try {
+    const client_name = String(req.body.client_name || '').trim();
+    const warehouse_name = String(req.body.warehouse_name || '').trim() || null;
+    let warehouse_code = String(req.body.warehouse_code || '').trim() || null;
+    if (warehouse_name && !warehouse_code) {
+      const [whRows] = await db.query(
+        'SELECT warehouse_code FROM warehouse_master WHERE LOWER(TRIM(warehouse_name)) = LOWER(TRIM(?)) LIMIT 1',
+        [warehouse_name]
+      );
+      warehouse_code = whRows[0]?.warehouse_code || null;
+    }
+    let client_code = normalizeCode(req.body.client_code, 'CL');
+    if (!client_code && client_name) {
+      client_code = normalizeCode(
+        generateClientCode(client_name, warehouse_name, warehouse_code),
+        'CL'
+      );
+    }
+    if (!client_code || !client_name) {
+      return res.status(400).json({ success: false, message: 'Client code and name are required.' });
+    }
+    // Ensure uniqueness — append -02, -03… if code already taken
+    let finalCode = client_code;
+    const [dup] = await db.query(
+      'SELECT client_code FROM client_master WHERE client_code = ? LIMIT 1',
+      [finalCode]
+    );
+    if (dup.length) {
+      for (let i = 2; i <= 99; i += 1) {
+        const suffix = String(i).padStart(2, '0');
+        const candidate = `${client_code}-${suffix}`.slice(0, 48);
+        const [hit] = await db.query(
+          'SELECT client_code FROM client_master WHERE client_code = ? LIMIT 1',
+          [candidate]
+        );
+        if (!hit.length) {
+          finalCode = candidate;
+          break;
+        }
+      }
+    }
+    await db.query(
+      `INSERT INTO client_master (client_code, client_name, warehouse_name, is_active)
+       VALUES (?, ?, ?, 1)`,
+      [finalCode, client_name, warehouse_name]
+    );
+    return res.status(201).json({
+      success: true,
+      message: 'Client created successfully.',
+      client_code: finalCode
+    });
+  } catch (error) {
+    if (String(error.message || '').toLowerCase().includes('duplicate')) {
+      return res.status(409).json({ success: false, message: 'Client code already exists.' });
+    }
+    return handleControllerError(res, error, {
+      checkpoint: 'masters_create_client',
+      req,
+      clientMessage: 'Failed to create client.',
+    });
+  }
+};
+
+exports.updateClient = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ success: false, message: 'Invalid client id.' });
+    const client_name = req.body.client_name != null ? String(req.body.client_name).trim() : null;
+    const warehouse_name = req.body.warehouse_name != null ? String(req.body.warehouse_name).trim() : null;
+    const is_active = req.body.is_active;
+    const sets = [];
+    const params = [];
+    if (client_name != null) {
+      if (!client_name) return res.status(400).json({ success: false, message: 'Client name cannot be empty.' });
+      sets.push('client_name = ?');
+      params.push(client_name);
+    }
+    if (warehouse_name != null) {
+      sets.push('warehouse_name = ?');
+      params.push(warehouse_name || null);
+    }
+    if (is_active !== undefined) {
+      sets.push('is_active = ?');
+      params.push(is_active ? 1 : 0);
+    }
+    if (!sets.length) return res.status(400).json({ success: false, message: 'No fields to update.' });
+    sets.push('updated_at = NOW()');
+    params.push(id);
+    await db.query(`UPDATE client_master SET ${sets.join(', ')} WHERE id = ?`, params);
+    return res.json({ success: true, message: 'Client updated successfully.' });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'masters_update_client',
+      req,
+      clientMessage: 'Failed to update client.',
+    });
+  }
+};

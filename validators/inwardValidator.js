@@ -176,6 +176,17 @@ function validateInwardRecord(record, options = {}) {
   };
 
   for (const [key, label] of REQUIRED_FIELDS) {
+    if (key === 'inward_client_name') {
+      const hasClient =
+        !isBlank(normalizedRecord.inward_client_name) ||
+        !isBlank(normalizedRecord.inward_client_code) ||
+        !isBlank(normalizedRecord.client_code);
+      if (!hasClient) {
+        missingKeys.push(key);
+        missing.push(label);
+      }
+      continue;
+    }
     if (isBlank(normalizedRecord[key])) {
       missingKeys.push(key);
       missing.push(label);

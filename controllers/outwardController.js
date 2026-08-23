@@ -9,10 +9,11 @@ const path = require('path');
 const { getSavedFilePath } = require('../config/multer');
 const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
-const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAccessScope } = require('../utils/pagination');
+const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAccessScope, appendDoWarehouseScope } = require('../utils/pagination');
 const { handleControllerError } = require('../utils/errorHandler');
 const { resolveLogAttribution } = require('../utils/logAttribution');
 const { parsePhotoCaptureMetadata, serializePhotoCaptureMetadata } = require('../utils/photoCaptureMeta');
+const { resolveWarehouseFields, resolveClientFields } = require('../utils/masterResolver');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -35,15 +36,16 @@ exports.getOutwardLogs = async (req, res) => {
     let conditions = [];
     let params = [];
 
-    if (req.user && req.user.role === 'do_operator' && req.user.warehouse_name) {
-      conditions.push('(warehouse_name = ? OR warehouse_name IS NULL)');
-      params.push(req.user.warehouse_name);
+    if (req.user && req.user.role === 'do_operator') {
+      appendDoWarehouseScope(conditions, params, req.user);
     }
 
     // Customer scoped filtering by allowed clients & warehouses
     appendSubAdminAccessScope(conditions, params, req.user, {
       clientColumn: 'outward_client_name',
-      warehouseColumn: 'warehouse_name'
+      clientCodeColumn: 'outward_client_code',
+      warehouseColumn: 'warehouse_name',
+      warehouseCodeColumn: 'warehouse_code'
     });
 
     if (search) {
@@ -81,7 +83,7 @@ exports.getOutwardLogs = async (req, res) => {
              outward_short_received_boxes_qty, outward_excess_received_boxes_qty, outward_damage_received_boxes_qty, 
              outward_material_type, outward_loading_supervisor_name, outward_remarks, outward_invoice_photos, outward_pod_photo,
              outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_pre_vehicle_temp_photo, outward_material_temp_photo, outward_vehicle_back_side_photo, 
-             outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, photo_capture_metadata, update_details, update_count, outward_created_at, outward_updated_at, warehouse_name, operator_email
+             outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo, photo_capture_metadata, update_details, update_count, outward_created_at, outward_updated_at, warehouse_name, warehouse_code, outward_client_code, operator_email
       FROM outward_temp_logs 
       ${whereClause}
       ORDER BY outward_entry_date DESC, outward_id DESC
@@ -137,12 +139,23 @@ exports.addOutwardLog = async (req, res) => {
     const outward_vehicle_back_side_photo_with_material = getPhotoPath('outward_vehicle_back_side_photo_with_material');
 
     // Required fields check
-    if (!data.outward_entry_date || !data.outward_vehicle_no || !data.outward_client_name) {
+    if (!data.outward_entry_date || !data.outward_vehicle_no || (!data.outward_client_name && !data.outward_client_code && !data.client_code)) {
       return res.status(400).json({ error: 'Date, Vehicle No, and Client Name are required.' });
     }
 
     const localTimestamp = formatDateTime(new Date());
-    const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, data);
+    const { warehouse_name: logWarehouse, warehouse_code: logWarehouseCode, operator_email: logOperatorEmail } = resolveLogAttribution(req, data);
+    const whFields = await resolveWarehouseFields({
+      warehouse_code: data.warehouse_code || logWarehouseCode,
+      warehouse_name: logWarehouse
+    });
+    const clFields = await resolveClientFields({
+      client_code: data.outward_client_code || data.client_code,
+      client_name: data.outward_client_name,
+      warehouse_name: whFields.warehouse_name,
+      warehouse_code: whFields.warehouse_code
+    });
+    const resolvedClientName = clFields.client_name || data.outward_client_name;
     const photo_capture_metadata = serializePhotoCaptureMetadata(
       parsePhotoCaptureMetadata(data.photo_capture_metadata)
     );
@@ -199,7 +212,7 @@ exports.addOutwardLog = async (req, res) => {
         outward_damage_received_boxes_qty, outward_material_type, outward_loading_supervisor_name, outward_remarks, 
         outward_invoice_photos, outward_pod_photo, outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_pre_vehicle_temp_photo, 
         outward_material_temp_photo, outward_vehicle_back_side_photo, outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo,
-        outward_created_at, outward_updated_at, warehouse_name, operator_email, photo_capture_metadata
+        outward_created_at, outward_updated_at, warehouse_name, warehouse_code, outward_client_code, operator_email, photo_capture_metadata
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
@@ -213,7 +226,7 @@ exports.addOutwardLog = async (req, res) => {
       data.outward_transporter_name || null,
       data.outward_driver_name || null,
       data.outward_driver_no || null,
-      data.outward_client_name,
+      resolvedClientName,
       data.outward_dock_no || null,
       data.outward_vehicle_reporting_time || null,
       startWithDate,
@@ -242,7 +255,9 @@ exports.addOutwardLog = async (req, res) => {
       outward_damage_boxes_photo,
       localTimestamp,
       localTimestamp,
-      logWarehouse,
+      whFields.warehouse_name,
+      whFields.warehouse_code,
+      clFields.client_code,
       logOperatorEmail,
       photo_capture_metadata
     ];
@@ -397,6 +412,16 @@ exports.updateOutwardLog = async (req, res) => {
     }
 
     const localTimestamp = formatDateTime(new Date());
+
+    const clFields = await resolveClientFields({
+      client_code: data.outward_client_code ?? data.client_code ?? current.outward_client_code,
+      client_name: data.outward_client_name ?? current.outward_client_name,
+      warehouse_name: current.warehouse_name,
+      warehouse_code: current.warehouse_code
+    });
+    const resolvedClientName = clFields.client_name || current.outward_client_name;
+    const resolvedClientCode = clFields.client_code || current.outward_client_code;
+
     const query = `
       UPDATE outward_temp_logs SET
         outward_entry_date = COALESCE(?, outward_entry_date),
@@ -409,6 +434,7 @@ exports.updateOutwardLog = async (req, res) => {
         outward_driver_name = ?,
         outward_driver_no = ?,
         outward_client_name = COALESCE(?, outward_client_name),
+        outward_client_code = COALESCE(?, outward_client_code),
         outward_dock_no = ?,
         outward_vehicle_reporting_time = ?,
         outward_loading_start_time = ?,
@@ -497,7 +523,7 @@ exports.updateOutwardLog = async (req, res) => {
       outward_transporter_name: data.outward_transporter_name !== undefined ? data.outward_transporter_name : current.outward_transporter_name,
       outward_driver_name: data.outward_driver_name !== undefined ? data.outward_driver_name : current.outward_driver_name,
       outward_driver_no: data.outward_driver_no !== undefined ? data.outward_driver_no : current.outward_driver_no,
-      outward_client_name: data.outward_client_name || current.outward_client_name,
+      outward_client_name: resolvedClientName,
       outward_dock_no: data.outward_dock_no !== undefined ? data.outward_dock_no : current.outward_dock_no,
       outward_vehicle_reporting_time: data.outward_vehicle_reporting_time !== undefined ? data.outward_vehicle_reporting_time : current.outward_vehicle_reporting_time,
       outward_loading_start_time: startWithDate,
@@ -578,7 +604,8 @@ exports.updateOutwardLog = async (req, res) => {
       data.outward_transporter_name !== undefined ? data.outward_transporter_name : current.outward_transporter_name,
       data.outward_driver_name !== undefined ? data.outward_driver_name : current.outward_driver_name,
       data.outward_driver_no !== undefined ? data.outward_driver_no : current.outward_driver_no,
-      data.outward_client_name,
+      resolvedClientName,
+      resolvedClientCode,
       data.outward_dock_no !== undefined ? data.outward_dock_no : current.outward_dock_no,
       data.outward_vehicle_reporting_time !== undefined ? data.outward_vehicle_reporting_time : current.outward_vehicle_reporting_time,
       startWithDate,

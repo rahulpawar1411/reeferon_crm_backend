@@ -25,7 +25,7 @@ router.get('/', verifyToken, permissionController.getPermissionRequests);
 router.get(
   '/record-history',
   verifyToken,
-  requireRole(['super_admin', 'customer']),
+  requireRole(['super_admin', 'customer', 'sub_admin']),
   permissionController.getRecordPermissionHistory
 );
 

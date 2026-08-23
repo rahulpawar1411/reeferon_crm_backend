@@ -220,6 +220,7 @@ exports.login = async (req, res) => {
       full_name: user.full_name || user.fullName || user.username || user.name || null,
       phone_no: user.phone_no || user.phone || null,
       warehouse_name: user.warehouse_name || user.warehouse || null,
+      warehouse_code: user.warehouse_code || null,
       allowed_clients: user.allowed_clients || null,
       allowed_warehouses: user.allowed_warehouses || null,
       chamber_limit: user.chamber_limit || 4

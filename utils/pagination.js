@@ -38,60 +38,92 @@ function parseCsvNames(value) {
 }
 
 /**
- * Customer access scope from assigned client / warehouse names (case-insensitive).
- * - Clients only → filter by client_name
- * - Warehouses only → filter by warehouse_name (NULL/empty also allowed)
- * - Both → client match AND (warehouse match OR warehouse missing on log)
- * Accepts legacy role `sub_admin` as customer.
+ * Customer access scope from assigned client / warehouse codes or names.
+ * CSV may contain codes (CL-… / WH-…) or legacy names — match either column.
+ * Empty warehouse on a log is still allowed when warehouses are assigned.
  */
 function appendSubAdminAccessScope(conditions, params, user, options = {}) {
   const role = user?.role === 'sub_admin' ? 'customer' : user?.role;
   if (!user || role !== 'customer') return;
 
   const clientColumn = options.clientColumn || 'client_name';
+  const clientCodeColumn = options.clientCodeColumn || 'client_code';
   const warehouseColumn = options.warehouseColumn || 'warehouse_name';
+  const warehouseCodeColumn = options.warehouseCodeColumn || 'warehouse_code';
 
   const clients = parseCsvNames(user.allowed_clients).map((c) => c.toLowerCase());
   const warehouses = parseCsvNames(user.allowed_warehouses).map((w) => w.toLowerCase());
 
   if (clients.length > 0) {
     const placeholders = clients.map(() => '?').join(', ');
-    conditions.push(`LOWER(TRIM(COALESCE(${clientColumn}, ''))) IN (${placeholders})`);
-    params.push(...clients);
+    conditions.push(
+      `(LOWER(TRIM(COALESCE(${clientCodeColumn}, ''))) IN (${placeholders}) OR LOWER(TRIM(COALESCE(${clientColumn}, ''))) IN (${placeholders}))`
+    );
+    params.push(...clients, ...clients);
   }
 
   if (warehouses.length > 0) {
     const placeholders = warehouses.map(() => '?').join(', ');
     conditions.push(
-      `(${warehouseColumn} IS NULL OR TRIM(COALESCE(${warehouseColumn}, '')) = '' OR LOWER(TRIM(${warehouseColumn})) IN (${placeholders}))`
+      `(${warehouseColumn} IS NULL OR TRIM(COALESCE(${warehouseColumn}, '')) = '' OR LOWER(TRIM(COALESCE(${warehouseCodeColumn}, ''))) IN (${placeholders}) OR LOWER(TRIM(${warehouseColumn})) IN (${placeholders}))`
     );
-    params.push(...warehouses);
+    params.push(...warehouses, ...warehouses);
   }
 }
 
-/** Optional warehouse filter for Super Admin / Customer list views. */
-function appendWarehouseFilter(conditions, params, query, user) {
+/** DO operator: own warehouse by code or name; blank warehouse on old logs still visible. */
+function appendDoWarehouseScope(conditions, params, user, options = {}) {
+  if (!user || user.role !== 'do_operator') return;
+  const name = String(user.warehouse_name || '').trim();
+  const code = String(user.warehouse_code || '').trim();
+  if (!name && !code) return;
+  const nameColumn = options.warehouseColumn || 'warehouse_name';
+  const codeColumn = options.warehouseCodeColumn || 'warehouse_code';
+  const parts = [`${nameColumn} IS NULL OR TRIM(COALESCE(${nameColumn}, '')) = ''`];
+  if (code) {
+    parts.push(`LOWER(TRIM(COALESCE(${codeColumn}, ''))) = ?`);
+    params.push(code.toLowerCase());
+  }
+  if (name) {
+    parts.push(`LOWER(TRIM(COALESCE(${nameColumn}, ''))) = ?`);
+    params.push(name.toLowerCase());
+  }
+  conditions.push(`(${parts.join(' OR ')})`);
+}
+
+/** Optional warehouse filter for Super Admin / Customer list views (code or name). */
+function appendWarehouseFilter(conditions, params, query, user, options = {}) {
   const warehouse = query.warehouse;
   if (!warehouse || warehouse === 'All') return;
   const role = user?.role === 'sub_admin' ? 'customer' : user?.role;
   if (!user || (role !== 'super_admin' && role !== 'customer')) return;
+  const nameColumn = options.warehouseColumn || 'warehouse_name';
+  const codeColumn = options.warehouseCodeColumn || 'warehouse_code';
   if (warehouse === 'Generic') {
-    conditions.push(`(warehouse_name IS NULL OR TRIM(COALESCE(warehouse_name, '')) = '' OR LOWER(TRIM(warehouse_name)) = ?)`);
+    conditions.push(`(${nameColumn} IS NULL OR TRIM(COALESCE(${nameColumn}, '')) = '' OR LOWER(TRIM(${nameColumn})) = ?)`);
     params.push('generic');
   } else {
-    conditions.push('LOWER(TRIM(COALESCE(warehouse_name, \'\'))) = ?');
-    params.push(String(warehouse).trim().toLowerCase());
+    const val = String(warehouse).trim().toLowerCase();
+    conditions.push(
+      `(LOWER(TRIM(COALESCE(${codeColumn}, ''))) = ? OR LOWER(TRIM(COALESCE(${nameColumn}, ''))) = ?)`
+    );
+    params.push(val, val);
   }
 }
 
-/** Optional client filter (SA / Customer / DO). */
-function appendClientFilter(conditions, params, query, user) {
+/** Optional client filter (SA / Customer / DO) — code or name. */
+function appendClientFilter(conditions, params, query, user, options = {}) {
   const client = query.client;
   if (!client || client === 'All') return;
   const role = user?.role === 'sub_admin' ? 'customer' : user?.role;
   if (!user || (role !== 'super_admin' && role !== 'customer' && role !== 'do_operator')) return;
-  conditions.push('LOWER(TRIM(COALESCE(client_name, \'\'))) = ?');
-  params.push(String(client).trim().toLowerCase());
+  const nameColumn = options.clientColumn || 'client_name';
+  const codeColumn = options.clientCodeColumn || 'client_code';
+  const val = String(client).trim().toLowerCase();
+  conditions.push(
+    `(LOWER(TRIM(COALESCE(${codeColumn}, ''))) = ? OR LOWER(TRIM(COALESCE(${nameColumn}, ''))) = ?)`
+  );
+  params.push(val, val);
 }
 
 /** Optional chamber filter so same client on two chambers does not mix. */
@@ -116,6 +148,7 @@ module.exports = {
   sendPaginated,
   parseCsvNames,
   appendSubAdminAccessScope,
+  appendDoWarehouseScope,
   appendWarehouseFilter,
   appendClientFilter,
   appendChamberFilter

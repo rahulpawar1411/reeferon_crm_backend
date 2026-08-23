@@ -9,11 +9,12 @@ const path = require('path');
 const { getSavedFilePath } = require('../config/multer');
 const { logActivity, getActorLabel } = require('../utils/logger');
 const { buildDiffString } = require('../utils/diffBuilder');
-const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAccessScope } = require('../utils/pagination');
+const { parsePagination, sendPaginated, appendWarehouseFilter, appendSubAdminAccessScope, appendDoWarehouseScope } = require('../utils/pagination');
 const { handleControllerError } = require('../utils/errorHandler');
 const { validateInwardCreate, validateInwardUpdate } = require('../validators/inwardValidator');
 const { resolveLogAttribution } = require('../utils/logAttribution');
 const { parsePhotoCaptureMetadata, serializePhotoCaptureMetadata } = require('../utils/photoCaptureMeta');
+const { resolveWarehouseFields, resolveClientFields } = require('../utils/masterResolver');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -36,15 +37,16 @@ exports.getInwardLogs = async (req, res) => {
     let conditions = [];
     let params = [];
 
-    if (req.user && req.user.role === 'do_operator' && req.user.warehouse_name) {
-      conditions.push('(warehouse_name = ? OR warehouse_name IS NULL)');
-      params.push(req.user.warehouse_name);
+    if (req.user && req.user.role === 'do_operator') {
+      appendDoWarehouseScope(conditions, params, req.user);
     }
 
     // Customer scoped filtering by allowed clients & warehouses
     appendSubAdminAccessScope(conditions, params, req.user, {
       clientColumn: 'inward_client_name',
-      warehouseColumn: 'warehouse_name'
+      clientCodeColumn: 'inward_client_code',
+      warehouseColumn: 'warehouse_name',
+      warehouseCodeColumn: 'warehouse_code'
     });
 
     if (search) {
@@ -82,7 +84,7 @@ exports.getInwardLogs = async (req, res) => {
              inward_short_received_boxes_qty, inward_excess_received_boxes_qty, inward_damage_received_boxes_qty, 
              inward_material_type, inward_unloading_supervisor_name, inward_remarks, inward_invoice_photos, inward_pod_photo,
              inward_vehicle_seal_photo, inward_vehicle_temp_photo, inward_material_temp_photo, inward_vehicle_back_side_photo, 
-             inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo, photo_capture_metadata, update_details, update_count, inward_created_at, inward_updated_at, warehouse_name, operator_email
+             inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo, photo_capture_metadata, update_details, update_count, inward_created_at, inward_updated_at, warehouse_name, warehouse_code, inward_client_code, operator_email
       FROM inward_temp_logs 
       ${whereClause}
       ORDER BY inward_entry_date DESC, inward_id DESC
@@ -142,7 +144,18 @@ exports.addInwardLog = async (req, res) => {
     }
 
     const localTimestamp = formatDateTime(new Date());
-    const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, data);
+    const { warehouse_name: logWarehouse, warehouse_code: logWarehouseCode, operator_email: logOperatorEmail } = resolveLogAttribution(req, data);
+    const whFields = await resolveWarehouseFields({
+      warehouse_code: data.warehouse_code || logWarehouseCode,
+      warehouse_name: logWarehouse
+    });
+    const clFields = await resolveClientFields({
+      client_code: data.inward_client_code || data.client_code,
+      client_name: data.inward_client_name,
+      warehouse_name: whFields.warehouse_name,
+      warehouse_code: whFields.warehouse_code
+    });
+    const resolvedClientName = clFields.client_name || data.inward_client_name;
     const photo_capture_metadata = serializePhotoCaptureMetadata(
       parsePhotoCaptureMetadata(data.photo_capture_metadata)
     );
@@ -195,8 +208,8 @@ exports.addInwardLog = async (req, res) => {
         inward_damage_received_boxes_qty, inward_material_type, inward_unloading_supervisor_name, inward_remarks, 
         inward_invoice_photos, inward_pod_photo, inward_vehicle_seal_photo, inward_vehicle_temp_photo, 
         inward_material_temp_photo, inward_vehicle_back_side_photo, inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo,
-        inward_created_at, inward_updated_at, warehouse_name, operator_email, photo_capture_metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        inward_created_at, inward_updated_at, warehouse_name, warehouse_code, inward_client_code, operator_email, photo_capture_metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const values = [
@@ -208,7 +221,7 @@ exports.addInwardLog = async (req, res) => {
       data.inward_transporter_name || null,
       data.inward_driver_name || null,
       data.inward_driver_no || null,
-      data.inward_client_name,
+      resolvedClientName,
       data.inward_dock_no || null,
       data.inward_vehicle_reporting_time || null,
       startWithDate,
@@ -236,7 +249,9 @@ exports.addInwardLog = async (req, res) => {
       inward_damage_boxes_photo,
       localTimestamp,
       localTimestamp,
-      logWarehouse,
+      whFields.warehouse_name,
+      whFields.warehouse_code,
+      clFields.client_code,
       logOperatorEmail,
       photo_capture_metadata
     ];
@@ -384,6 +399,16 @@ exports.updateInwardLog = async (req, res) => {
     }
 
     const localTimestamp = formatDateTime(new Date());
+
+    const clFields = await resolveClientFields({
+      client_code: data.inward_client_code ?? data.client_code ?? current.inward_client_code,
+      client_name: data.inward_client_name ?? current.inward_client_name,
+      warehouse_name: current.warehouse_name,
+      warehouse_code: current.warehouse_code
+    });
+    const resolvedClientName = clFields.client_name || current.inward_client_name;
+    const resolvedClientCode = clFields.client_code || current.inward_client_code;
+
     const query = `
       UPDATE inward_temp_logs SET
         inward_entry_date = COALESCE(?, inward_entry_date),
@@ -395,6 +420,7 @@ exports.updateInwardLog = async (req, res) => {
         inward_driver_name = ?,
         inward_driver_no = ?,
         inward_client_name = COALESCE(?, inward_client_name),
+        inward_client_code = COALESCE(?, inward_client_code),
         inward_dock_no = ?,
         inward_vehicle_reporting_time = ?,
         inward_unloading_start_time = ?,
@@ -477,7 +503,7 @@ exports.updateInwardLog = async (req, res) => {
       inward_transporter_name: data.inward_transporter_name !== undefined ? data.inward_transporter_name : current.inward_transporter_name,
       inward_driver_name: data.inward_driver_name !== undefined ? data.inward_driver_name : current.inward_driver_name,
       inward_driver_no: data.inward_driver_no !== undefined ? data.inward_driver_no : current.inward_driver_no,
-      inward_client_name: data.inward_client_name || current.inward_client_name,
+      inward_client_name: resolvedClientName,
       inward_dock_no: data.inward_dock_no !== undefined ? data.inward_dock_no : current.inward_dock_no,
       inward_vehicle_reporting_time: data.inward_vehicle_reporting_time !== undefined ? data.inward_vehicle_reporting_time : current.inward_vehicle_reporting_time,
       inward_unloading_start_time: startWithDate,
@@ -559,7 +585,8 @@ exports.updateInwardLog = async (req, res) => {
       data.inward_transporter_name !== undefined ? data.inward_transporter_name : current.inward_transporter_name,
       data.inward_driver_name !== undefined ? data.inward_driver_name : current.inward_driver_name,
       data.inward_driver_no !== undefined ? data.inward_driver_no : current.inward_driver_no,
-      data.inward_client_name,
+      resolvedClientName,
+      resolvedClientCode,
       data.inward_dock_no !== undefined ? data.inward_dock_no : current.inward_dock_no,
       data.inward_vehicle_reporting_time !== undefined ? data.inward_vehicle_reporting_time : current.inward_vehicle_reporting_time,
       startWithDate,

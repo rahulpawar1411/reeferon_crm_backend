@@ -7,6 +7,10 @@ function resolveLogAttribution(req, body = {}) {
     (req.user && req.user.warehouse_name) ||
     body.warehouse_name ||
     null;
+  const warehouseCode =
+    (req.user && req.user.warehouse_code) ||
+    body.warehouse_code ||
+    null;
   const operatorEmail =
     (req.user && req.user.email) ||
     body.operator_email ||
@@ -14,6 +18,7 @@ function resolveLogAttribution(req, body = {}) {
 
   return {
     warehouse_name: warehouse ? String(warehouse).trim() : null,
+    warehouse_code: warehouseCode ? String(warehouseCode).trim() : null,
     operator_email: operatorEmail ? String(operatorEmail).trim().toLowerCase() : null
   };
 }

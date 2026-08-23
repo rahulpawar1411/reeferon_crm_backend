@@ -21,6 +21,13 @@ function parseCsvNames(value) {
 }
 
 /** Scope inventory rows to customer allowed clients / warehouses. */
+function matchesScopeToken(tokens, name, code) {
+  if (!tokens.length) return true;
+  const n = String(name || '').trim().toLowerCase();
+  const c = String(code || '').trim().toLowerCase();
+  return (c && tokens.includes(c)) || (n && tokens.includes(n));
+}
+
 function applyCustomerInventoryScope(rows, user) {
   if (!user || user.role !== 'customer') return rows;
   const clients = parseCsvNames(user.allowed_clients).map((c) => c.toLowerCase());
@@ -28,10 +35,8 @@ function applyCustomerInventoryScope(rows, user) {
   if (clients.length === 0 && warehouses.length === 0) return rows;
 
   return (rows || []).filter((r) => {
-    const client = String(r.client_name || '').trim().toLowerCase();
-    const warehouse = String(r.warehouse_name || '').trim().toLowerCase();
-    const clientOk = clients.length === 0 || clients.includes(client);
-    const warehouseOk = warehouses.length === 0 || warehouses.includes(warehouse);
+    const clientOk = matchesScopeToken(clients, r.client_name, r.client_code);
+    const warehouseOk = matchesScopeToken(warehouses, r.warehouse_name, r.warehouse_code);
     return clientOk && warehouseOk;
   });
 }
@@ -46,12 +51,15 @@ async function applyDoInventoryScope(rows, user) {
 
   try {
     const [opRows] = await db.query(
-      'SELECT warehouse_name, chamber_limit FROM do_operators WHERE email = ? LIMIT 1',
+      'SELECT warehouse_name, warehouse_code, chamber_limit FROM do_operators WHERE email = ? LIMIT 1',
       [user.email]
     );
     if (opRows.length > 0) {
       if (opRows[0].warehouse_name) {
         warehouse = String(opRows[0].warehouse_name).trim();
+      }
+      if (opRows[0].warehouse_code) {
+        user.warehouse_code = opRows[0].warehouse_code;
       }
       const lim = parseInt(opRows[0].chamber_limit || limit, 10);
       if (Number.isFinite(lim) && lim >= 1) limit = lim;
@@ -62,12 +70,17 @@ async function applyDoInventoryScope(rows, user) {
 
   let filtered = Array.isArray(rows) ? [...rows] : [];
   const whLower = warehouse.toLowerCase();
+  const codeLower = String(user.warehouse_code || '').trim().toLowerCase();
 
-  // Same rule as chamber-temp DO access: own warehouse OR blank warehouse
-  if (whLower) {
+  // Same rule as chamber-temp DO access: own warehouse (code or name) OR blank warehouse
+  if (whLower || codeLower) {
     filtered = filtered.filter((r) => {
       const wh = String(r.warehouse_name || '').trim().toLowerCase();
-      return !wh || wh === whLower;
+      const code = String(r.warehouse_code || '').trim().toLowerCase();
+      if (!wh && !code) return true;
+      if (codeLower && code && code === codeLower) return true;
+      if (whLower && wh && wh === whLower) return true;
+      return false;
     });
   }
 
@@ -126,9 +139,9 @@ exports.getDashboardStats = async (req, res) => {
     const [totalRows] = await db.query('SELECT COUNT(*) as totalLeads FROM leads');
     
     // 2. Count leads by status
-    const [newRows] = await db.query('SELECT COUNT(*) as newLeads FROM leads WHERE status = "New"');
-    const [inProgressRows] = await db.query('SELECT COUNT(*) as inProgressLeads FROM leads WHERE status = "In Progress"');
-    const [wonRows] = await db.query('SELECT COUNT(*) as wonLeads FROM leads WHERE status = "Won"');
+    const [newRows] = await db.query("SELECT COUNT(*) as newLeads FROM leads WHERE status = 'New'");
+    const [inProgressRows] = await db.query("SELECT COUNT(*) as inProgressLeads FROM leads WHERE status = 'In Progress'");
+    const [wonRows] = await db.query("SELECT COUNT(*) as wonLeads FROM leads WHERE status = 'Won'");
 
     // 3. Calculate total pipeline value (INR)
     const [valueRows] = await db.query('SELECT SUM(value) as totalValue FROM leads');
@@ -328,6 +341,24 @@ exports.getAccessScopeOptions = async (req, res) => {
       }
     }
 
+    try {
+      const [masterWh] = await db.query(
+        `SELECT warehouse_code, warehouse_name FROM warehouse_master WHERE is_active = 1 ORDER BY warehouse_name ASC`
+      );
+      (masterWh || []).forEach((row) => {
+        if (row.warehouse_name) warehouseSet.add(String(row.warehouse_name).trim());
+      });
+      const [masterCl] = await db.query(
+        `SELECT client_code, client_name, warehouse_name FROM client_master WHERE is_active = 1 ORDER BY client_name ASC`
+      );
+      (masterCl || []).forEach((row) => {
+        if (row.client_name) clientSet.add(String(row.client_name).trim());
+        addWarehouseClient(row.warehouse_name, row.client_name);
+      });
+    } catch (masterErr) {
+      console.warn('Access scope master tables skipped:', masterErr.message);
+    }
+
     // Case-insensitive unique display names (prefer first-seen casing)
     const uniqueClients = [];
     const seenClients = new Set();
@@ -472,7 +503,7 @@ exports.getInventoryReconciliation = async (req, res) => {
     const { search, warehouse } = req.query;
 
     const sql = `
-      SELECT
+      SELECT 
         d.client_name,
         d.warehouse_name,
         d.chamber_id,
@@ -639,7 +670,7 @@ exports.getDailyInventoryDeltas = async (req, res) => {
         shift,
         inspection_time,
         created_at
-      FROM daily_chamber_temp_logs
+      FROM daily_chamber_temp_logs 
       WHERE client_name IS NOT NULL AND TRIM(client_name) != ''
     `;
     const params = [];
@@ -682,7 +713,7 @@ exports.getDailyInventoryDeltas = async (req, res) => {
           let inRange = true;
           if (fromDate && entryDate < fromDate) inRange = false;
           if (toDate && entryDate > toDate) inRange = false;
-
+          
           if (inRange) {
             indexOfLatest = i;
             break;
@@ -734,7 +765,7 @@ exports.getDailyInventoryDeltas = async (req, res) => {
               : Math.max(0, Number(rawCount) || 0);
             return {
               id: g.id,
-              date: g.entry_date,
+            date: g.entry_date,
               entry_date: g.entry_date,
               shift,
               slot: shift,
@@ -834,24 +865,46 @@ exports.getDoTaskOverview = async (req, res) => {
     }
 
     const [operators] = await db.query(
-      `SELECT id, email, full_name, warehouse_name, chamber_limit
+      `SELECT id, email, full_name, phone_no, warehouse_name, warehouse_code, chamber_limit
        FROM do_operators
        ORDER BY warehouse_name ASC, full_name ASC`
     );
 
-    const [assignments] = await db.query(`
-      SELECT
-        a.chamber_id,
-        a.client_name,
-        a.warehouse_name AS assignment_warehouse,
-        c.name AS chamber_name
-      FROM chamber_client_assignments a
-      JOIN chambers c ON c.id = a.chamber_id
-      WHERE a.status = 'active'
-        AND a.client_name IS NOT NULL
-        AND TRIM(a.client_name) <> ''
-        AND LOWER(TRIM(a.client_name)) <> 'general'
-    `);
+    let assignments = [];
+    try {
+      const [assignmentRows] = await db.query(`
+        SELECT
+          a.chamber_id,
+          a.client_name,
+          NULLIF(TRIM(a.warehouse_name), '') AS assignment_warehouse,
+          c.name AS chamber_name
+        FROM chamber_client_assignments a
+        LEFT JOIN chambers c ON c.id = a.chamber_id
+        WHERE (a.status IS NULL OR LOWER(TRIM(a.status)) = 'active')
+          AND a.client_name IS NOT NULL
+          AND TRIM(a.client_name) <> ''
+          AND LOWER(TRIM(a.client_name)) <> 'general'
+      `);
+      assignments = Array.isArray(assignmentRows) ? assignmentRows : [];
+    } catch (assignErr) {
+      console.warn('DO task overview assignments query failed:', assignErr.message);
+      assignments = [];
+    }
+
+    let masterClients = [];
+    try {
+      const [masterRows] = await db.query(`
+        SELECT client_name, warehouse_name, client_code
+        FROM client_master
+        WHERE (is_active IS NULL OR is_active = 1)
+          AND client_name IS NOT NULL
+          AND TRIM(client_name) <> ''
+        ORDER BY client_name ASC
+      `);
+      masterClients = Array.isArray(masterRows) ? masterRows : [];
+    } catch (masterErr) {
+      console.warn('DO task overview client_master skipped:', masterErr.message);
+    }
 
     const dateList = [todayStr, ...pastDates];
     const [logs] = await db.query(
@@ -912,6 +965,7 @@ exports.getDoTaskOverview = async (req, res) => {
         buckets.set(key, {
           warehouse_name: normalizeWh(warehouse),
           operators: [],
+          clients: [],
           assignment_count: 0,
           completed: 0,
           pending: 0,
@@ -930,6 +984,9 @@ exports.getDoTaskOverview = async (req, res) => {
         id: op.id,
         name: op.full_name || op.email?.split('@')[0] || 'DO',
         email: op.email,
+        phone_no: op.phone_no || null,
+        warehouse_name: op.warehouse_name || null,
+        warehouse_code: op.warehouse_code || null,
         chamber_limit: op.chamber_limit
       });
     });
@@ -938,6 +995,11 @@ exports.getDoTaskOverview = async (req, res) => {
       const warehouse = a.assignment_warehouse || 'Unassigned';
       const bucket = ensureBucket(warehouse);
       bucket.assignment_count += 1;
+      bucket.clients.push({
+        client_name: String(a.client_name || '').trim(),
+        chamber_name: a.chamber_name || null,
+        chamber_id: a.chamber_id != null ? a.chamber_id : null
+      });
 
       expectedShifts.forEach((shift) => {
         bucket.expected_today += 1;
@@ -973,17 +1035,98 @@ exports.getDoTaskOverview = async (req, res) => {
       }))
       .sort((a, b) => a.warehouse_name.localeCompare(b.warehouse_name));
 
+    const flatOperators = [];
+    const flatClients = [];
+    const seenClient = new Set();
+    const pushClient = (entry) => {
+      const name = String(entry.client_name || '').trim();
+      if (!name || name.toLowerCase() === 'general') return;
+      const warehouse = normalizeWh(entry.warehouse_name);
+      const chamber = entry.chamber_name ? String(entry.chamber_name).trim() : '';
+      const key = `${warehouse.toLowerCase()}|${name.toLowerCase()}|${chamber.toLowerCase()}`;
+      if (seenClient.has(key)) return;
+      seenClient.add(key);
+      flatClients.push({
+        client_name: name,
+        warehouse_name: warehouse,
+        chamber_name: chamber || null,
+        chamber_id: entry.chamber_id != null ? entry.chamber_id : null,
+        client_code: entry.client_code || null,
+        source: entry.source || 'assignment'
+      });
+    };
+
+    warehouses.forEach((w) => {
+      (w.operators || []).forEach((op) => {
+        flatOperators.push({
+          ...op,
+          warehouse_name: w.warehouse_name,
+          completed: w.completed,
+          pending: w.pending,
+          overdue: w.overdue
+        });
+      });
+      (w.clients || []).forEach((c) => {
+        pushClient({
+          client_name: c.client_name,
+          warehouse_name: w.warehouse_name,
+          chamber_name: c.chamber_name,
+          chamber_id: c.chamber_id,
+          source: 'assignment'
+        });
+      });
+    });
+
+    masterClients.forEach((row) => {
+      pushClient({
+        client_name: row.client_name,
+        warehouse_name: row.warehouse_name,
+        client_code: row.client_code,
+        source: 'master'
+      });
+    });
+
+    flatClients.sort(
+      (a, b) =>
+        String(a.client_name).localeCompare(String(b.client_name)) ||
+        String(a.warehouse_name).localeCompare(String(b.warehouse_name))
+    );
+    flatOperators.sort(
+      (a, b) =>
+        String(a.warehouse_name).localeCompare(String(b.warehouse_name)) ||
+        String(a.name).localeCompare(String(b.name))
+    );
+
+    const uniqueClientNames = new Set(
+      flatClients.map((c) => String(c.client_name || '').trim().toLowerCase()).filter(Boolean)
+    );
+
+    let portalCustomerCount = 0;
+    try {
+      const [custCountRows] = await db.query('SELECT COUNT(*) AS total FROM customers');
+      portalCustomerCount = Number(custCountRows?.[0]?.total) || 0;
+    } catch (custCountErr) {
+      console.warn('DO task overview customers count skipped:', custCountErr.message);
+    }
+
     const summary = warehouses.reduce(
       (acc, w) => {
         acc.warehouses += 1;
         acc.operators += w.operators.length;
-        acc.clients += Number(w.assignment_count) || 0;
         acc.completed += w.completed;
         acc.pending += w.pending;
         acc.overdue += w.overdue;
         return acc;
       },
-      { warehouses: 0, operators: 0, clients: 0, completed: 0, pending: 0, overdue: 0 }
+      {
+        warehouses: 0,
+        operators: 0,
+        clients: uniqueClientNames.size || flatClients.length,
+        customers: portalCustomerCount,
+        completed: 0,
+        pending: 0,
+        overdue: 0
+      }
     );
 
     return res.status(200).json({
@@ -991,13 +1134,85 @@ exports.getDoTaskOverview = async (req, res) => {
       today: todayStr,
       expected_shifts: expectedShifts,
       summary,
-      warehouses
+      warehouses,
+      operators: flatOperators,
+      clients: flatClients
     });
   } catch (error) {
     return handleControllerError(res, error, {
       checkpoint: 'getDoTaskOverview',
       req,
       clientMessage: 'Server error while building DO task overview.'
+    });
+  }
+};
+
+/**
+ * GET /api/dashboard/customers
+ * Portal customer accounts (customers table) — not chamber client names.
+ */
+exports.getPortalCustomers = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id, email, full_name, phone_no, allowed_clients, allowed_warehouses, created_at
+       FROM customers
+       ORDER BY full_name ASC, email ASC`
+    );
+    const customers = (rows || []).map((row) => ({
+      id: row.id,
+      email: row.email || null,
+      full_name: row.full_name || null,
+      phone_no: row.phone_no || null,
+      allowed_clients: row.allowed_clients || null,
+      allowed_warehouses: row.allowed_warehouses || null,
+      created_at: row.created_at || null
+    }));
+    return res.status(200).json({
+      success: true,
+      total: customers.length,
+      customers
+    });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'getPortalCustomers',
+      req,
+      clientMessage: 'Server error while loading customers.'
+    });
+  }
+};
+
+/**
+ * GET /api/dashboard/do-operators
+ * Data Operator accounts for Sub-Admin / Admin home lists.
+ */
+exports.getDoOperatorsList = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT id, email, full_name, phone_no, warehouse_name, warehouse_code, chamber_limit, created_at
+       FROM do_operators
+       ORDER BY warehouse_name ASC, full_name ASC, email ASC`
+    );
+    const operators = (rows || []).map((row) => ({
+      id: row.id,
+      email: row.email || null,
+      name: row.full_name || (row.email ? String(row.email).split('@')[0] : 'DO'),
+      full_name: row.full_name || null,
+      phone_no: row.phone_no || null,
+      warehouse_name: row.warehouse_name || 'Unassigned',
+      warehouse_code: row.warehouse_code || null,
+      chamber_limit: row.chamber_limit != null ? Number(row.chamber_limit) : null,
+      created_at: row.created_at || null
+    }));
+    return res.status(200).json({
+      success: true,
+      total: operators.length,
+      operators
+    });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'getDoOperatorsList',
+      req,
+      clientMessage: 'Server error while loading DO operators.'
     });
   }
 };

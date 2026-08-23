@@ -5,6 +5,7 @@
 
 const mysql = require('mysql2/promise');
 const dotenv = require('dotenv');
+const { backfillMasterData } = require('../utils/masterBackfill');
 
 // Load environment variables from .env file
 dotenv.config();
@@ -60,6 +61,190 @@ async function testDbConnection() {
     // Use pool.query only (no held getConnection) so FreeSQL connection slots stay free
     await pool.query('SELECT 1');
     console.log('✅ Connected to MySQL Database:', process.env.DB_NAME || (isFreeSqlHost ? 'FreeSQL' : 'reeferon_crm_db'));
+
+    // Fresh DB bootstrap: core auth + inward/outward log tables (must exist before ALTER migrations)
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS super_admin (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          email VARCHAR(150) NOT NULL,
+          password VARCHAR(255) NOT NULL,
+          full_name VARCHAR(150) DEFAULT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_super_admin_email (email)
+        )
+      `);
+      console.log('🌱 Verified super_admin table is online.');
+    } catch (superErr) {
+      console.warn('⚠️ Table super_admin creation failed:', superErr.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS do_operators (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          email VARCHAR(150) NOT NULL,
+          password VARCHAR(255) NOT NULL,
+          full_name VARCHAR(150) DEFAULT NULL,
+          phone_no VARCHAR(50) DEFAULT NULL,
+          warehouse_name VARCHAR(150) DEFAULT NULL,
+          warehouse_code VARCHAR(50) DEFAULT NULL,
+          chamber_limit INT DEFAULT 4,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_do_operators_email (email)
+        )
+      `);
+      console.log('🌱 Verified do_operators table is online.');
+    } catch (doErr) {
+      console.warn('⚠️ Table do_operators creation failed:', doErr.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS inward_temp_logs (
+          inward_id INT AUTO_INCREMENT PRIMARY KEY,
+          reference_no VARCHAR(50) DEFAULT NULL,
+          inward_entry_date DATE NOT NULL,
+          inward_vehicle_no VARCHAR(100) NOT NULL,
+          inward_seal_no VARCHAR(100) DEFAULT NULL,
+          inward_vehicle_temp DECIMAL(5,2) DEFAULT NULL,
+          inward_material_temp DECIMAL(5,2) DEFAULT NULL,
+          inward_transporter_name VARCHAR(150) DEFAULT NULL,
+          inward_driver_name VARCHAR(150) DEFAULT NULL,
+          inward_driver_no VARCHAR(50) DEFAULT NULL,
+          inward_client_name VARCHAR(150) NOT NULL,
+          inward_dock_no VARCHAR(50) DEFAULT NULL,
+          inward_vehicle_reporting_time VARCHAR(100) DEFAULT NULL,
+          inward_unloading_start_time VARCHAR(100) DEFAULT NULL,
+          inward_unloading_duration_hours VARCHAR(20) DEFAULT NULL,
+          inward_unloading_duration_mins VARCHAR(20) DEFAULT NULL,
+          inward_unloading_end_time VARCHAR(100) DEFAULT NULL,
+          inward_pallets_in_qty INT DEFAULT 0,
+          inward_invoice_qty INT DEFAULT 0,
+          inward_received_qty INT DEFAULT 0,
+          inward_received_boxes_qty INT DEFAULT 0,
+          inward_short_received_boxes_qty INT DEFAULT 0,
+          inward_excess_received_boxes_qty INT DEFAULT 0,
+          inward_damage_received_boxes_qty INT DEFAULT 0,
+          inward_material_type VARCHAR(100) DEFAULT NULL,
+          inward_unloading_supervisor_name VARCHAR(150) DEFAULT NULL,
+          inward_remarks TEXT DEFAULT NULL,
+          inward_invoice_photos TEXT DEFAULT NULL,
+          inward_pod_photo VARCHAR(255) DEFAULT NULL,
+          inward_vehicle_seal_photo VARCHAR(255) DEFAULT NULL,
+          inward_vehicle_temp_photo VARCHAR(255) DEFAULT NULL,
+          inward_material_temp_photo VARCHAR(255) DEFAULT NULL,
+          inward_vehicle_back_side_photo VARCHAR(255) DEFAULT NULL,
+          inward_vehicle_back_side_photo_with_material VARCHAR(255) DEFAULT NULL,
+          inward_count_sheet_photo VARCHAR(255) DEFAULT NULL,
+          inward_damage_boxes_photo VARCHAR(255) DEFAULT NULL,
+          inward_created_at DATETIME DEFAULT NULL,
+          inward_updated_at DATETIME DEFAULT NULL,
+          warehouse_name VARCHAR(150) DEFAULT NULL,
+          warehouse_code VARCHAR(50) DEFAULT NULL,
+          inward_client_code VARCHAR(50) DEFAULT NULL,
+          operator_email VARCHAR(150) DEFAULT NULL,
+          photo_capture_metadata LONGTEXT DEFAULT NULL,
+          update_details TEXT DEFAULT NULL,
+          update_count INT NOT NULL DEFAULT 0,
+          INDEX idx_inward_entry_date (inward_entry_date),
+          INDEX idx_inward_client (inward_client_name),
+          INDEX idx_inward_warehouse (warehouse_name),
+          INDEX idx_inward_ref (reference_no)
+        )
+      `);
+      console.log('🌱 Verified inward_temp_logs table is online.');
+    } catch (inwardErr) {
+      console.warn('⚠️ Table inward_temp_logs creation failed:', inwardErr.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS outward_temp_logs (
+          outward_id INT AUTO_INCREMENT PRIMARY KEY,
+          reference_no VARCHAR(50) DEFAULT NULL,
+          outward_entry_date DATE NOT NULL,
+          outward_vehicle_no VARCHAR(100) NOT NULL,
+          outward_seal_no VARCHAR(100) DEFAULT NULL,
+          outward_vehicle_temp DECIMAL(5,2) DEFAULT NULL,
+          outward_pre_vehicle_temp DECIMAL(5,2) DEFAULT NULL,
+          outward_material_temp DECIMAL(5,2) DEFAULT NULL,
+          outward_transporter_name VARCHAR(150) DEFAULT NULL,
+          outward_driver_name VARCHAR(150) DEFAULT NULL,
+          outward_driver_no VARCHAR(50) DEFAULT NULL,
+          outward_client_name VARCHAR(150) NOT NULL,
+          outward_dock_no VARCHAR(50) DEFAULT NULL,
+          outward_vehicle_reporting_time VARCHAR(100) DEFAULT NULL,
+          outward_loading_start_time VARCHAR(100) DEFAULT NULL,
+          outward_loading_duration_hours VARCHAR(20) DEFAULT NULL,
+          outward_loading_duration_mins VARCHAR(20) DEFAULT NULL,
+          outward_loading_end_time VARCHAR(100) DEFAULT NULL,
+          outward_pallets_in_qty INT DEFAULT 0,
+          outward_invoice_qty INT DEFAULT 0,
+          outward_received_qty INT DEFAULT 0,
+          outward_received_boxes_qty INT DEFAULT 0,
+          outward_short_received_boxes_qty INT DEFAULT 0,
+          outward_excess_received_boxes_qty INT DEFAULT 0,
+          outward_damage_received_boxes_qty INT DEFAULT 0,
+          outward_material_type VARCHAR(100) DEFAULT NULL,
+          outward_loading_supervisor_name VARCHAR(150) DEFAULT NULL,
+          outward_remarks TEXT DEFAULT NULL,
+          outward_invoice_photos TEXT DEFAULT NULL,
+          outward_pod_photo VARCHAR(255) DEFAULT NULL,
+          outward_vehicle_seal_photo VARCHAR(255) DEFAULT NULL,
+          outward_vehicle_temp_photo VARCHAR(255) DEFAULT NULL,
+          outward_pre_vehicle_temp_photo VARCHAR(255) DEFAULT NULL,
+          outward_material_temp_photo VARCHAR(255) DEFAULT NULL,
+          outward_vehicle_back_side_photo VARCHAR(255) DEFAULT NULL,
+          outward_vehicle_back_side_photo_with_material VARCHAR(255) DEFAULT NULL,
+          outward_count_sheet_photo VARCHAR(255) DEFAULT NULL,
+          outward_damage_boxes_photo VARCHAR(255) DEFAULT NULL,
+          outward_created_at DATETIME DEFAULT NULL,
+          outward_updated_at DATETIME DEFAULT NULL,
+          warehouse_name VARCHAR(150) DEFAULT NULL,
+          warehouse_code VARCHAR(50) DEFAULT NULL,
+          outward_client_code VARCHAR(50) DEFAULT NULL,
+          operator_email VARCHAR(150) DEFAULT NULL,
+          photo_capture_metadata LONGTEXT DEFAULT NULL,
+          update_details TEXT DEFAULT NULL,
+          update_count INT NOT NULL DEFAULT 0,
+          INDEX idx_outward_entry_date (outward_entry_date),
+          INDEX idx_outward_client (outward_client_name),
+          INDEX idx_outward_warehouse (warehouse_name),
+          INDEX idx_outward_ref (reference_no)
+        )
+      `);
+      console.log('🌱 Verified outward_temp_logs table is online.');
+    } catch (outwardErr) {
+      console.warn('⚠️ Table outward_temp_logs creation failed:', outwardErr.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS daily_chamber_temp_logs (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          entry_date DATE NOT NULL,
+          client_name VARCHAR(150) NOT NULL,
+          chamber_name VARCHAR(100) NOT NULL,
+          chamber_id INT DEFAULT NULL,
+          inspection_time VARCHAR(50) NOT NULL,
+          box_temp DECIMAL(4,1) NOT NULL,
+          monitor_supervisor_name VARCHAR(150) NOT NULL,
+          temp_sensor_image VARCHAR(255) DEFAULT NULL,
+          photo_capture_time VARCHAR(50) DEFAULT NULL,
+          time_variance_minutes INT DEFAULT 0,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NULL DEFAULT NULL,
+          warehouse_name VARCHAR(150) DEFAULT NULL,
+          operator_email VARCHAR(150) DEFAULT NULL,
+          chamber_type VARCHAR(50) DEFAULT 'Frozen',
+          overdue_time VARCHAR(100) DEFAULT 'same day'
+        )
+      `);
+      console.log('🌱 Verified daily_chamber_temp_logs table is online.');
+    } catch (chamberErr) {
+      console.warn('⚠️ Table daily_chamber_temp_logs creation failed:', chamberErr.message);
+    }
     
     // Auto migration: add columns to do_operators table if they don't exist
     try {
@@ -81,6 +266,10 @@ async function testDbConnection() {
       if (!colNames.includes('chamber_limit')) {
         await pool.query('ALTER TABLE do_operators ADD COLUMN chamber_limit INT DEFAULT 4');
         console.log('🌱 Added column chamber_limit to do_operators.');
+      }
+      if (!colNames.includes('warehouse_code')) {
+        await pool.query('ALTER TABLE do_operators ADD COLUMN warehouse_code VARCHAR(50) DEFAULT NULL');
+        console.log('🌱 Added column warehouse_code to do_operators.');
       }
     } catch (tblErr) {
       console.warn('⚠️ Table do_operators verification skipped:', tblErr.message);
@@ -210,6 +399,80 @@ async function testDbConnection() {
       console.log('🌱 Verified sub_admins table (mobile full-access, separate from customers).');
     } catch (saErr) {
       console.warn('⚠️ Table sub_admins verification skipped:', saErr.message);
+    }
+
+    // Checkpoint 1 foundation: Warehouse + Client masters with unique codes
+    // Backward-compatible only: existing name-based flows remain unchanged.
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS warehouse_master (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          warehouse_code VARCHAR(50) NOT NULL UNIQUE,
+          warehouse_name VARCHAR(150) NOT NULL,
+          city VARCHAR(100) DEFAULT NULL,
+          is_active TINYINT(1) NOT NULL DEFAULT 1,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NULL DEFAULT NULL,
+          INDEX idx_wh_name (warehouse_name),
+          INDEX idx_wh_city (city),
+          INDEX idx_wh_active (is_active)
+        )
+      `);
+
+      const [whCols] = await pool.query('SHOW COLUMNS FROM warehouse_master');
+      const whColNames = whCols.map((c) => c.Field);
+      if (!whColNames.includes('city')) {
+        await pool.query('ALTER TABLE warehouse_master ADD COLUMN city VARCHAR(100) DEFAULT NULL AFTER warehouse_name');
+        console.log('🌱 Added city to warehouse_master.');
+      }
+      if (!whColNames.includes('is_active')) {
+        await pool.query('ALTER TABLE warehouse_master ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER city');
+        console.log('🌱 Added is_active to warehouse_master.');
+      }
+      if (!whColNames.includes('updated_at')) {
+        await pool.query('ALTER TABLE warehouse_master ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL AFTER created_at');
+        console.log('🌱 Added updated_at to warehouse_master.');
+      }
+      console.log('🌱 Verified warehouse_master table is online.');
+    } catch (whErr) {
+      console.warn('⚠️ warehouse_master verification skipped:', whErr.message);
+    }
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS client_master (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          client_code VARCHAR(50) NOT NULL UNIQUE,
+          client_name VARCHAR(150) NOT NULL,
+          warehouse_name VARCHAR(150) DEFAULT NULL,
+          is_active TINYINT(1) NOT NULL DEFAULT 1,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NULL DEFAULT NULL,
+          INDEX idx_client_name (client_name),
+          INDEX idx_client_wh_name (warehouse_name),
+          INDEX idx_client_active (is_active)
+        )
+      `);
+
+      const [clientCols] = await pool.query('SHOW COLUMNS FROM client_master');
+      const clientColNames = clientCols.map((c) => c.Field);
+      if (!clientColNames.includes('warehouse_name')) {
+        await pool.query(
+          'ALTER TABLE client_master ADD COLUMN warehouse_name VARCHAR(150) DEFAULT NULL AFTER client_name'
+        );
+        console.log('🌱 Added warehouse_name to client_master.');
+      }
+      if (!clientColNames.includes('is_active')) {
+        await pool.query('ALTER TABLE client_master ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1 AFTER client_name');
+        console.log('🌱 Added is_active to client_master.');
+      }
+      if (!clientColNames.includes('updated_at')) {
+        await pool.query('ALTER TABLE client_master ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL AFTER created_at');
+        console.log('🌱 Added updated_at to client_master.');
+      }
+      console.log('🌱 Verified client_master table is online.');
+    } catch (clientErr) {
+      console.warn('⚠️ client_master verification skipped:', clientErr.message);
     }
 
     // Auto migration: create daily_temp_logs table if not exists
@@ -488,33 +751,7 @@ async function testDbConnection() {
       console.warn('⚠️ Table customer_admin_notes creation failed:', notesErr.message);
     }
 
-    // Auto migration: create daily_chamber_temp_logs table if not exists
-    try {
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS daily_chamber_temp_logs (
-          id INT AUTO_INCREMENT PRIMARY KEY,
-          entry_date DATE NOT NULL,
-          client_name VARCHAR(150) NOT NULL,
-          chamber_name VARCHAR(100) NOT NULL,
-          chamber_id INT DEFAULT NULL,
-          inspection_time VARCHAR(50) NOT NULL,
-          box_temp DECIMAL(4,1) NOT NULL,
-          monitor_supervisor_name VARCHAR(150) NOT NULL,
-          temp_sensor_image VARCHAR(255) DEFAULT NULL,
-          photo_capture_time VARCHAR(50) DEFAULT NULL,
-          time_variance_minutes INT DEFAULT 0,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP NULL DEFAULT NULL,
-          warehouse_name VARCHAR(150) DEFAULT NULL,
-          operator_email VARCHAR(150) DEFAULT NULL,
-          chamber_type VARCHAR(50) DEFAULT 'Frozen',
-          overdue_time VARCHAR(100) DEFAULT 'same day'
-        )
-      `);
-      console.log('🌱 Verified daily_chamber_temp_logs table is online.');
-    } catch (chamberErr) {
-      console.warn('⚠️ Table daily_chamber_temp_logs creation failed:', chamberErr.message);
-    }
+    // daily_chamber_temp_logs — created in fresh-DB bootstrap (before log ALTER migrations)
 
     // Auto migration: login lockout tracking (5 fails / 1h → 30 min lock)
     try {
@@ -582,12 +819,16 @@ async function testDbConnection() {
           chamber_id INT NOT NULL,
           client_name VARCHAR(150) NOT NULL,
           warehouse_name VARCHAR(150) DEFAULT NULL,
+          client_code VARCHAR(50) DEFAULT NULL,
+          warehouse_code VARCHAR(50) DEFAULT NULL,
           remark TEXT DEFAULT NULL,
           status VARCHAR(50) DEFAULT 'active',
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP NULL DEFAULT NULL,
           FOREIGN KEY (chamber_id) REFERENCES chambers(id) ON DELETE CASCADE,
-          UNIQUE KEY uq_chamber_client_wh (chamber_id, client_name, warehouse_name)
+          UNIQUE KEY uq_chamber_client_wh (chamber_id, client_name, warehouse_name),
+          INDEX idx_cca_client_code (client_code),
+          INDEX idx_cca_warehouse_code (warehouse_code)
         )
       `);
       console.log('🌱 Verified chamber_client_assignments table is online.');
@@ -632,6 +873,40 @@ async function testDbConnection() {
         await pool.query('ALTER TABLE chamber_client_assignments ADD COLUMN updated_at TIMESTAMP NULL DEFAULT NULL');
         console.log('🌱 Added column updated_at to chamber_client_assignments.');
       }
+
+      if (!colNames.includes('client_code')) {
+        await pool.query('ALTER TABLE chamber_client_assignments ADD COLUMN client_code VARCHAR(50) DEFAULT NULL AFTER warehouse_name');
+        console.log('🌱 Added column client_code to chamber_client_assignments.');
+      }
+      if (!colNames.includes('warehouse_code')) {
+        await pool.query('ALTER TABLE chamber_client_assignments ADD COLUMN warehouse_code VARCHAR(50) DEFAULT NULL AFTER client_code');
+        console.log('🌱 Added column warehouse_code to chamber_client_assignments.');
+      }
+      try {
+        await pool.query('ALTER TABLE chamber_client_assignments ADD UNIQUE KEY uq_chamber_client_wh_codes (chamber_id, client_code, warehouse_code)');
+        console.log('🌱 Added unique index uq_chamber_client_wh_codes.');
+      } catch (_) {}
+
+      // Backfill code references for legacy assignments by matching master names.
+      try {
+        await pool.query(`
+          UPDATE chamber_client_assignments cca
+          JOIN warehouse_master wm
+            ON LOWER(TRIM(wm.warehouse_name)) = LOWER(TRIM(COALESCE(cca.warehouse_name, '')))
+          SET cca.warehouse_code = wm.warehouse_code
+          WHERE (cca.warehouse_code IS NULL OR TRIM(cca.warehouse_code) = '')
+        `);
+      } catch (_) {}
+      try {
+        await pool.query(`
+          UPDATE chamber_client_assignments cca
+          JOIN client_master cm
+            ON LOWER(TRIM(cm.client_name)) = LOWER(TRIM(cca.client_name))
+           AND LOWER(TRIM(COALESCE(cm.warehouse_name, ''))) = LOWER(TRIM(COALESCE(cca.warehouse_name, '')))
+          SET cca.client_code = cm.client_code
+          WHERE (cca.client_code IS NULL OR TRIM(cca.client_code) = '')
+        `);
+      } catch (_) {}
       // No default Amul/HyFun/etc. assignment seed — keep empty for live data only
     } catch (assErr) {
       console.warn('⚠️ Table chamber_client_assignments creation failed:', assErr.message);
@@ -792,6 +1067,109 @@ async function testDbConnection() {
       }
     }
 
+
+    // Checkpoint 2: backfill warehouse/client masters from existing name-based data
+    try {
+      await backfillMasterData(pool);
+    } catch (backfillErr) {
+      console.warn('⚠️ Master backfill skipped:', backfillErr.message);
+    }
+
+    // Checkpoint 5: warehouse_code / client_code on log tables
+    const logCodeMigrations = [
+      { table: 'daily_chamber_temp_logs', clientCodeCol: 'client_code' },
+      { table: 'inward_temp_logs', clientCodeCol: 'inward_client_code' },
+      { table: 'outward_temp_logs', clientCodeCol: 'outward_client_code' },
+      { table: 'daily_temp_logs', clientCodeCol: 'client_code' }
+    ];
+    for (const { table, clientCodeCol } of logCodeMigrations) {
+      try {
+        const [columns] = await pool.query(`SHOW COLUMNS FROM ${table}`);
+        const colNames = columns.map((c) => c.Field);
+        if (!colNames.includes('warehouse_code')) {
+          await pool.query(`ALTER TABLE ${table} ADD COLUMN warehouse_code VARCHAR(50) DEFAULT NULL`);
+          console.log(`🌱 Added warehouse_code to ${table}.`);
+        }
+        if (!colNames.includes(clientCodeCol)) {
+          await pool.query(`ALTER TABLE ${table} ADD COLUMN ${clientCodeCol} VARCHAR(50) DEFAULT NULL`);
+          console.log(`🌱 Added ${clientCodeCol} to ${table}.`);
+        }
+      } catch (colErr) {
+        console.warn(`⚠️ Failed to add code columns to ${table}:`, colErr.message);
+      }
+    }
+
+    // Backfill log codes from master tables (idempotent)
+    const logCodeBackfills = [
+      `UPDATE daily_chamber_temp_logs d
+       INNER JOIN warehouse_master wm ON LOWER(TRIM(wm.warehouse_name)) = LOWER(TRIM(d.warehouse_name))
+       SET d.warehouse_code = wm.warehouse_code
+       WHERE (d.warehouse_code IS NULL OR TRIM(d.warehouse_code) = '')
+         AND d.warehouse_name IS NOT NULL AND TRIM(d.warehouse_name) != ''`,
+      `UPDATE daily_chamber_temp_logs d
+       INNER JOIN client_master cm
+         ON LOWER(TRIM(cm.client_name)) = LOWER(TRIM(d.client_name))
+        AND LOWER(TRIM(COALESCE(cm.warehouse_name, ''))) = LOWER(TRIM(COALESCE(d.warehouse_name, '')))
+       SET d.client_code = cm.client_code
+       WHERE (d.client_code IS NULL OR TRIM(d.client_code) = '')
+         AND d.client_name IS NOT NULL AND TRIM(d.client_name) != ''`,
+      `UPDATE inward_temp_logs d
+       INNER JOIN warehouse_master wm ON LOWER(TRIM(wm.warehouse_name)) = LOWER(TRIM(d.warehouse_name))
+       SET d.warehouse_code = wm.warehouse_code
+       WHERE (d.warehouse_code IS NULL OR TRIM(d.warehouse_code) = '')
+         AND d.warehouse_name IS NOT NULL AND TRIM(d.warehouse_name) != ''`,
+      `UPDATE inward_temp_logs d
+       INNER JOIN client_master cm
+         ON LOWER(TRIM(cm.client_name)) = LOWER(TRIM(d.inward_client_name))
+        AND LOWER(TRIM(COALESCE(cm.warehouse_name, ''))) = LOWER(TRIM(COALESCE(d.warehouse_name, '')))
+       SET d.inward_client_code = cm.client_code
+       WHERE (d.inward_client_code IS NULL OR TRIM(d.inward_client_code) = '')
+         AND d.inward_client_name IS NOT NULL AND TRIM(d.inward_client_name) != ''`,
+      `UPDATE outward_temp_logs d
+       INNER JOIN warehouse_master wm ON LOWER(TRIM(wm.warehouse_name)) = LOWER(TRIM(d.warehouse_name))
+       SET d.warehouse_code = wm.warehouse_code
+       WHERE (d.warehouse_code IS NULL OR TRIM(d.warehouse_code) = '')
+         AND d.warehouse_name IS NOT NULL AND TRIM(d.warehouse_name) != ''`,
+      `UPDATE outward_temp_logs d
+       INNER JOIN client_master cm
+         ON LOWER(TRIM(cm.client_name)) = LOWER(TRIM(d.outward_client_name))
+        AND LOWER(TRIM(COALESCE(cm.warehouse_name, ''))) = LOWER(TRIM(COALESCE(d.warehouse_name, '')))
+       SET d.outward_client_code = cm.client_code
+       WHERE (d.outward_client_code IS NULL OR TRIM(d.outward_client_code) = '')
+         AND d.outward_client_name IS NOT NULL AND TRIM(d.outward_client_name) != ''`,
+      `UPDATE daily_temp_logs d
+       INNER JOIN warehouse_master wm ON LOWER(TRIM(wm.warehouse_name)) = LOWER(TRIM(d.warehouse_name))
+       SET d.warehouse_code = wm.warehouse_code
+       WHERE (d.warehouse_code IS NULL OR TRIM(d.warehouse_code) = '')
+         AND d.warehouse_name IS NOT NULL AND TRIM(d.warehouse_name) != ''`,
+      `UPDATE daily_temp_logs d
+       INNER JOIN client_master cm
+         ON LOWER(TRIM(cm.client_name)) = LOWER(TRIM(d.client_name))
+        AND LOWER(TRIM(COALESCE(cm.warehouse_name, ''))) = LOWER(TRIM(COALESCE(d.warehouse_name, '')))
+       SET d.client_code = cm.client_code
+       WHERE (d.client_code IS NULL OR TRIM(d.client_code) = '')
+         AND d.client_name IS NOT NULL AND TRIM(d.client_name) != ''`
+    ];
+    for (const sql of logCodeBackfills) {
+      try {
+        await pool.query(sql);
+      } catch (bfErr) {
+        console.warn('⚠️ Log code backfill step skipped:', bfErr.message);
+      }
+    }
+    console.log('🌱 Log table code backfill completed.');
+
+    try {
+      await pool.query(`
+        UPDATE do_operators d
+        INNER JOIN warehouse_master wm ON LOWER(TRIM(wm.warehouse_name)) = LOWER(TRIM(d.warehouse_name))
+        SET d.warehouse_code = wm.warehouse_code
+        WHERE (d.warehouse_code IS NULL OR TRIM(d.warehouse_code) = '')
+          AND d.warehouse_name IS NOT NULL AND TRIM(d.warehouse_name) != ''
+      `);
+    } catch (opWhErr) {
+      console.warn('⚠️ DO warehouse_code backfill skipped:', opWhErr.message);
+    }
 
     // Log successful server startup process
     try {

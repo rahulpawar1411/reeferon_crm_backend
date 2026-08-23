@@ -9,6 +9,7 @@ const { logActivity } = require('../utils/logger');
 const { handleControllerError } = require('../utils/errorHandler');
 const { sendOperatorCredentialsEmail } = require('../utils/emailService');
 const { ensureNumberedChambers } = require('./chamberController');
+const { resolveWarehouseFields } = require('../utils/masterResolver');
 
 function normalizeIndiaPhone(phone_no) {
   let digits = String(phone_no || '').replace(/\D/g, '');
@@ -23,9 +24,10 @@ function normalizeIndiaPhone(phone_no) {
  * Keep past + future DO data access aligned with profile warehouse.
  * Updates all logs tagged to this operator email.
  */
-async function syncOperatorWarehouseOnPastLogs(operatorEmail, warehouseName) {
+async function syncOperatorWarehouseOnPastLogs(operatorEmail, warehouseName, warehouseCode = null) {
   const email = String(operatorEmail || '').trim();
   const warehouse = String(warehouseName || '').trim();
+  const code = String(warehouseCode || '').trim();
   if (!email || !warehouse) return { updated: 0 };
 
   const tables = [
@@ -38,10 +40,10 @@ async function syncOperatorWarehouseOnPastLogs(operatorEmail, warehouseName) {
     try {
       const [result] = await db.query(
         `UPDATE ${table}
-         SET warehouse_name = ?
+         SET warehouse_name = ?, warehouse_code = COALESCE(?, warehouse_code)
          WHERE LOWER(TRIM(operator_email)) = LOWER(?)
            AND (warehouse_name IS NULL OR TRIM(warehouse_name) = '' OR warehouse_name <> ?)`,
-        [warehouse, email, warehouse]
+        [warehouse, code || null, email, warehouse]
       );
       updated += Number(result?.affectedRows || 0);
     } catch (err) {
@@ -55,7 +57,7 @@ async function syncOperatorWarehouseOnPastLogs(operatorEmail, warehouseName) {
 exports.getOperators = async (req, res) => {
   try {
     const [rows] = await db.query(
-      'SELECT id, email, full_name, phone_no, warehouse_name, chamber_limit, created_at FROM do_operators ORDER BY id DESC'
+      'SELECT id, email, full_name, phone_no, warehouse_name, warehouse_code, chamber_limit, created_at FROM do_operators ORDER BY id DESC'
     );
     return res.json(rows);
   } catch (err) {
@@ -70,17 +72,19 @@ exports.getOperators = async (req, res) => {
 // 2. CREATE NEW OPERATOR
 exports.createOperator = async (req, res) => {
   try {
-    const { email, password, full_name, phone_no, warehouse_name, chamber_limit } = req.body;
+    const { email, password, full_name, phone_no, warehouse_name, warehouse_code, chamber_limit } = req.body;
     if (!email || !password || !full_name || !phone_no || !warehouse_name) {
       return res.status(400).json({ error: 'All fields (Email, Password, Full Name, Phone No., Warehouse / Data Access) are required.' });
     }
     const limitVal = chamber_limit ? parseInt(chamber_limit, 10) : 4;
-    const warehouseTrim = String(warehouse_name).trim();
     const emailTrim = String(email).trim().toLowerCase();
     const phoneTrim = normalizeIndiaPhone(phone_no);
     if (!phoneTrim) {
       return res.status(400).json({ error: 'Phone No. must be a 10-digit Indian mobile number.' });
     }
+    const whFields = await resolveWarehouseFields({ warehouse_code, warehouse_name });
+    const warehouseTrim = whFields.warehouse_name || String(warehouse_name).trim();
+    const warehouseCode = whFields.warehouse_code || null;
 
     // Check if operator already exists
     const [existing] = await db.query(
@@ -96,8 +100,8 @@ exports.createOperator = async (req, res) => {
     const hashed = await bcrypt.hash(password, salt);
 
     await db.query(
-      'INSERT INTO do_operators (email, password, full_name, phone_no, warehouse_name, chamber_limit) VALUES (?, ?, ?, ?, ?, ?)',
-      [emailTrim, hashed, full_name, phoneTrim, warehouseTrim, limitVal]
+      'INSERT INTO do_operators (email, password, full_name, phone_no, warehouse_name, warehouse_code, chamber_limit) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [emailTrim, hashed, full_name, phoneTrim, warehouseTrim, warehouseCode, limitVal]
     );
 
     // Pre-create Chamber 1 .. N so DO sees assigned chambers immediately
@@ -153,18 +157,20 @@ exports.createOperator = async (req, res) => {
 exports.updateOperator = async (req, res) => {
   try {
     const { id } = req.params;
-    const { email, password, full_name, phone_no, warehouse_name, chamber_limit } = req.body;
+    const { email, password, full_name, phone_no, warehouse_name, warehouse_code, chamber_limit } = req.body;
 
     if (!email || !full_name || !phone_no || !warehouse_name) {
       return res.status(400).json({ error: 'All fields (Email, Full Name, Phone No., Warehouse / Data Access) are required.' });
     }
     const limitVal = chamber_limit ? parseInt(chamber_limit, 10) : 4;
-    const warehouseTrim = String(warehouse_name).trim();
     const emailTrim = String(email).trim().toLowerCase();
     const phoneTrim = normalizeIndiaPhone(phone_no);
     if (!phoneTrim) {
       return res.status(400).json({ error: 'Phone No. must be a 10-digit Indian mobile number.' });
     }
+    const whFields = await resolveWarehouseFields({ warehouse_code, warehouse_name });
+    const warehouseTrim = whFields.warehouse_name || String(warehouse_name).trim();
+    const warehouseCode = whFields.warehouse_code || null;
 
     const [beforeRows] = await db.query(
       'SELECT email, warehouse_name FROM do_operators WHERE id = ? LIMIT 1',
@@ -190,13 +196,13 @@ exports.updateOperator = async (req, res) => {
       const salt = await bcrypt.genSalt(10);
       const hashed = await bcrypt.hash(password, salt);
       await db.query(
-        'UPDATE do_operators SET email = ?, password = ?, full_name = ?, phone_no = ?, warehouse_name = ?, chamber_limit = ? WHERE id = ?',
-        [emailTrim, hashed, full_name, phoneTrim, warehouseTrim, limitVal, id]
+        'UPDATE do_operators SET email = ?, password = ?, full_name = ?, phone_no = ?, warehouse_name = ?, warehouse_code = ?, chamber_limit = ? WHERE id = ?',
+        [emailTrim, hashed, full_name, phoneTrim, warehouseTrim, warehouseCode, limitVal, id]
       );
     } else {
       await db.query(
-        'UPDATE do_operators SET email = ?, full_name = ?, phone_no = ?, warehouse_name = ?, chamber_limit = ? WHERE id = ?',
-        [emailTrim, full_name, phoneTrim, warehouseTrim, limitVal, id]
+        'UPDATE do_operators SET email = ?, full_name = ?, phone_no = ?, warehouse_name = ?, warehouse_code = ?, chamber_limit = ? WHERE id = ?',
+        [emailTrim, full_name, phoneTrim, warehouseTrim, warehouseCode, limitVal, id]
       );
     }
 
@@ -211,7 +217,7 @@ exports.updateOperator = async (req, res) => {
     );
     let pastLogsUpdated = 0;
     for (const syncEmail of syncEmails) {
-      const syncResult = await syncOperatorWarehouseOnPastLogs(syncEmail, warehouseTrim);
+      const syncResult = await syncOperatorWarehouseOnPastLogs(syncEmail, warehouseTrim, warehouseCode);
       pastLogsUpdated += Number(syncResult.updated || 0);
     }
 

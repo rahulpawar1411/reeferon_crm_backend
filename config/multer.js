@@ -68,6 +68,8 @@ const createUploader = (folderName, filePrefix) => {
               const localFilePath = path.join(uploadDir, `${filename}${ext}`);
               fs.writeFileSync(localFilePath, req.file.buffer);
               console.log(`💾 Local Backup Saved: ${localFilePath}`);
+              req.file.localRelPath = `uploads/${folderName}/${filename}${ext}`;
+              req.file.filename = `${filename}${ext}`;
 
               // 2. Upload to Cloudinary CDN
               const result = await uploadBuffer(req.file.buffer, folderName, publicId);
@@ -109,6 +111,8 @@ const createUploader = (folderName, filePrefix) => {
                   const localFilePath = path.join(uploadDir, `${filename}${ext}`);
                   fs.writeFileSync(localFilePath, file.buffer);
                   console.log(`💾 Local Backup Saved (Field): ${localFilePath}`);
+                  file.localRelPath = `uploads/${folderName}/${filename}${ext}`;
+                  file.filename = `${filename}${ext}`;
                   
                   // 2. Upload to Cloudinary CDN
                   const promise = uploadBuffer(file.buffer, folderName, publicId)
@@ -161,10 +165,29 @@ const createUploader = (folderName, filePrefix) => {
  */
 const getSavedFilePath = (file, folderName) => {
   if (!file) return null;
+  // Prefer durable local path when dual-save wrote a disk backup — Cloudinary
+  // URLs in DB often 404 while uploads/<folder>/<file> still serves.
+  if (file.localRelPath) return file.localRelPath;
+  if (file.filename) {
+    const name = String(file.filename);
+    if (name.includes('/') || name.startsWith('http')) {
+      /* fall through */
+    } else {
+      return `uploads/${folderName}/${name}`;
+    }
+  }
   if (file.path && /^https?:\/\//i.test(file.path)) {
     return file.path;
   }
-  return `uploads/${folderName}/${file.filename}`;
+  if (file.path && !/^https?:\/\//i.test(file.path)) {
+    const normalized = String(file.path).replace(/\\/g, '/');
+    const idx = normalized.lastIndexOf('/uploads/');
+    if (idx >= 0) return normalized.slice(idx + 1);
+    if (normalized.includes(`uploads/${folderName}/`)) {
+      return normalized.slice(normalized.indexOf('uploads/'));
+    }
+  }
+  return file.filename ? `uploads/${folderName}/${file.filename}` : null;
 };
 
 module.exports = {

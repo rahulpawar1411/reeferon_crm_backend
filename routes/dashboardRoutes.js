@@ -25,4 +25,10 @@ router.get('/daily-inventory-deltas', dashboardController.getDailyInventoryDelta
 // GET /api/dashboard/do-task-overview - Warehouse-wise DO completed / pending / overdue
 router.get('/do-task-overview', dashboardController.getDoTaskOverview);
 
+// GET /api/dashboard/customers - Portal customer accounts (customers table)
+router.get('/customers', dashboardController.getPortalCustomers);
+
+// GET /api/dashboard/do-operators - Data Operator accounts list
+router.get('/do-operators', dashboardController.getDoOperatorsList);
+
 module.exports = router;

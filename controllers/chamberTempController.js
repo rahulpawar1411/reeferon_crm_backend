@@ -15,7 +15,8 @@ const {
   appendWarehouseFilter,
   appendClientFilter,
   appendChamberFilter,
-  appendSubAdminAccessScope
+  appendSubAdminAccessScope,
+  appendDoWarehouseScope
 } = require('../utils/pagination');
 const { logErrorCheckpoint } = require('../utils/errorHandler');
 const { resolveLogAttribution } = require('../utils/logAttribution');
@@ -24,6 +25,7 @@ const {
   consumeGrantedPermission
 } = require('./permissionController');
 const { parseOptionalFloat } = require('../utils/photoCaptureMeta');
+const { resolveWarehouseFields, resolveClientFields } = require('../utils/masterResolver');
 
 let memoryChamberLogs = [];
 
@@ -88,15 +90,16 @@ exports.getChamberLogs = async (req, res) => {
     let conditions = [];
     let params = [];
 
-    if (req.user && req.user.role === 'do_operator' && req.user.warehouse_name) {
-      conditions.push('(warehouse_name = ? OR warehouse_name IS NULL)');
-      params.push(req.user.warehouse_name);
+    if (req.user && req.user.role === 'do_operator') {
+      appendDoWarehouseScope(conditions, params, req.user);
     }
 
-    // Customer scoped filtering by allowed clients & warehouses (live DB names, case-insensitive)
+    // Customer scoped filtering by allowed clients & warehouses (code or name)
     appendSubAdminAccessScope(conditions, params, req.user, {
       clientColumn: 'client_name',
-      warehouseColumn: 'warehouse_name'
+      clientCodeColumn: 'client_code',
+      warehouseColumn: 'warehouse_name',
+      warehouseCodeColumn: 'warehouse_code'
     });
 
     if (search) {
@@ -115,7 +118,10 @@ exports.getChamberLogs = async (req, res) => {
     }
 
     appendWarehouseFilter(conditions, params, req.query, req.user);
-    appendClientFilter(conditions, params, req.query, req.user);
+    appendClientFilter(conditions, params, req.query, req.user, {
+      clientColumn: 'client_name',
+      clientCodeColumn: 'client_code'
+    });
     appendChamberFilter(conditions, params, req.query);
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -126,7 +132,7 @@ exports.getChamberLogs = async (req, res) => {
     );
     const total = countRows[0]?.total ?? 0;
 
-    const query = `SELECT id, reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, box_temp AS chamber_temp, box_count, overdue_time, monitor_supervisor_name, temp_sensor_image, photo_capture_time, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, time_variance_minutes, update_details, update_count, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, operator_email, chamber_type, shift, chamber_id, is_native, remarks FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC LIMIT ? OFFSET ?`;
+    const query = `SELECT id, reference_no, entry_date, client_name, client_code, chamber_name, inspection_time, box_temp, box_temp AS chamber_temp, box_count, overdue_time, monitor_supervisor_name, temp_sensor_image, photo_capture_time, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, time_variance_minutes, update_details, update_count, DATE_FORMAT(entry_date, '%Y-%m-%d') as formatted_date, created_at, updated_at, warehouse_name, warehouse_code, operator_email, chamber_type, shift, chamber_id, is_native, remarks FROM daily_chamber_temp_logs ${whereClause} ORDER BY entry_date DESC, id DESC LIMIT ? OFFSET ?`;
 
     const [rows] = await db.query(query, [...params, limit, offset]);
     return sendPaginated(res, rows, total, page, limit);
@@ -206,7 +212,7 @@ exports.addChamberLog = async (req, res) => {
     }
   }
 
-  if (!entry_date || !client_name || !chamber_name || box_temp === undefined || !monitor_supervisor_name) {
+  if (!entry_date || (!client_name && !req.body.client_code) || !chamber_name || box_temp === undefined || !monitor_supervisor_name) {
     return res.status(400).json({ error: 'Entry Date, Client Name, Chamber Name, Box Temp, and Monitor Supervisor Name are required.' });
   }
 
@@ -231,19 +237,31 @@ exports.addChamberLog = async (req, res) => {
       return 'Morning';
     };
     const shiftVal = resolveShift(req.body.shift, inspection_time);
-    const { warehouse_name: logWarehouse, operator_email: logOperatorEmail } = resolveLogAttribution(req, req.body);
+    const { warehouse_name: logWarehouse, warehouse_code: logWarehouseCode, operator_email: logOperatorEmail } = resolveLogAttribution(req, req.body);
+    const whFields = await resolveWarehouseFields({
+      warehouse_code: req.body.warehouse_code || logWarehouseCode,
+      warehouse_name: logWarehouse
+    });
+    const clFields = await resolveClientFields({
+      client_code: req.body.client_code,
+      client_name,
+      warehouse_name: whFields.warehouse_name,
+      warehouse_code: whFields.warehouse_code
+    });
+    const resolvedClientName = clFields.client_name || client_name;
     const photo_capture_latitude = parseOptionalFloat(req.body.photo_capture_latitude);
     const photo_capture_longitude = parseOptionalFloat(req.body.photo_capture_longitude);
     const photo_capture_accuracy = parseOptionalFloat(req.body.photo_capture_accuracy);
 
     const query = `
       INSERT INTO daily_chamber_temp_logs 
-      (entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, created_at, updated_at, warehouse_name, operator_email, shift, chamber_type)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (entry_date, client_name, client_code, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, created_at, updated_at, warehouse_name, warehouse_code, operator_email, shift, chamber_type)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     const values = [
       entry_date, 
-      client_name, 
+      resolvedClientName,
+      clFields.client_code,
       chamber_name, 
       inspection_time || '11:00',
       box_temp,
@@ -256,7 +274,8 @@ exports.addChamberLog = async (req, res) => {
       photo_capture_accuracy,
       localTimestamp,
       localTimestamp,
-      logWarehouse,
+      whFields.warehouse_name,
+      whFields.warehouse_code,
       logOperatorEmail,
       shiftVal,
       req.body.chamber_type || 'Frozen'
@@ -331,7 +350,7 @@ exports.updateChamberLog = async (req, res) => {
       }
     }
 
-    const [existingRows] = await db.query('SELECT reference_no, entry_date, client_name, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, update_details, update_count, chamber_type FROM daily_chamber_temp_logs WHERE id = ?', [id]);
+    const [existingRows] = await db.query('SELECT reference_no, entry_date, client_name, client_code, chamber_name, inspection_time, box_temp, monitor_supervisor_name, temp_sensor_image, photo_capture_time, time_variance_minutes, photo_capture_latitude, photo_capture_longitude, photo_capture_accuracy, update_details, update_count, chamber_type, warehouse_name, warehouse_code FROM daily_chamber_temp_logs WHERE id = ?', [id]);
     
     let temp_sensor_image = req.body.temp_sensor_image;
     let photo_capture_time = null;
@@ -341,6 +360,8 @@ exports.updateChamberLog = async (req, res) => {
     let photo_capture_accuracy = null;
     let update_details = null;
     let update_count = 0;
+    let resolvedClientName = client_name || null;
+    let resolvedClientCode = req.body.client_code || null;
 
     if (existingRows.length > 0) {
       const current = existingRows[0];
@@ -405,9 +426,19 @@ exports.updateChamberLog = async (req, res) => {
         time_variance_minutes = calculateVariance(mergedEntryDate, mergedInspectionTime, photo_capture_time);
       }
 
+      const clFields = await resolveClientFields({
+        client_code: req.body.client_code ?? current.client_code,
+        client_name: client_name ?? current.client_name,
+        warehouse_name: current.warehouse_name,
+        warehouse_code: current.warehouse_code
+      });
+      const resolvedClientName = clFields.client_name || current.client_name;
+      const resolvedClientCode = clFields.client_code || current.client_code;
+
       const updatedValues = {
         entry_date: entry_date || current.entry_date,
-        client_name: client_name || current.client_name,
+        client_name: resolvedClientName,
+        client_code: resolvedClientCode,
         chamber_name: chamber_name || current.chamber_name,
         inspection_time: inspection_time || current.inspection_time,
         box_temp: box_temp !== undefined ? (box_temp !== '' ? parseFloat(box_temp) : null) : current.box_temp,
@@ -449,6 +480,7 @@ exports.updateChamberLog = async (req, res) => {
       SET 
         entry_date = COALESCE(?, entry_date),
         client_name = COALESCE(?, client_name),
+        client_code = COALESCE(?, client_code),
         chamber_name = COALESCE(?, chamber_name), 
         inspection_time = COALESCE(?, inspection_time), 
         box_temp = COALESCE(?, box_temp), 
@@ -469,7 +501,8 @@ exports.updateChamberLog = async (req, res) => {
     `;
     await db.query(query, [
       entry_date || null,
-      client_name || null,
+      resolvedClientName || client_name || null,
+      resolvedClientCode || null,
       chamber_name || null,
       inspection_time || null,
       box_temp !== undefined ? (box_temp !== '' ? box_temp : null) : null,
