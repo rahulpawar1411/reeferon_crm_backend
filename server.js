@@ -134,6 +134,10 @@ app.use((req, res, next) => {
 });
 
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Missing upload files must 404 (not fall through to SPA HTML — breaks <img>)
+app.use('/uploads', (req, res) => {
+  res.status(404).type('text/plain').send('Upload not found');
+});
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
 
 // Public diagnostic debug endpoint to troubleshoot live sync failures

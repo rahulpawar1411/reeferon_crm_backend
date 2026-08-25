@@ -809,6 +809,12 @@ async function testDbConnection() {
           await pool.query("ALTER TABLE chambers ADD COLUMN chamber_type VARCHAR(50) DEFAULT 'Frozen'");
           console.log('🌱 Added column chamber_type to chambers table.');
         }
+        if (!chColNames.includes('warehouse_name')) {
+          await pool.query(
+            'ALTER TABLE chambers ADD COLUMN warehouse_name VARCHAR(150) DEFAULT NULL AFTER name'
+          );
+          console.log('🌱 Added column warehouse_name to chambers table.');
+        }
       } catch (migrateErr) {
         console.warn('⚠️ chambers table migration failed:', migrateErr.message);
       }

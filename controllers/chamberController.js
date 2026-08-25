@@ -203,23 +203,92 @@ exports.getChambers = async (req, res) => {
       if (!Number.isFinite(limit) || limit < 1) limit = 4;
       appliedLimit = limit;
 
-      // Prefer chambers that have active assignments for this DO warehouse
+      // 1) Chambers with active client assignments for this warehouse
+      // 2) Chambers created/approved for this warehouse (warehouse_name on chambers)
+      //    — so approved chamber shows even before any client is assigned
+      // 3) Chambers named in this DO's ADD_CHAMBER activity (legacy approvals without warehouse_name)
       let warehouseChambers = [];
       if (warehouseName) {
         const [whRows] = await db.query(
           `SELECT DISTINCT c.id, c.name, c.chamber_type
            FROM chambers c
-           INNER JOIN chamber_client_assignments cca ON cca.chamber_id = c.id
-           WHERE LOWER(TRIM(cca.warehouse_name)) = LOWER(TRIM(?))
-             AND (cca.status IS NULL OR cca.status = 'active')
+           WHERE LOWER(TRIM(IFNULL(c.warehouse_name, ''))) = LOWER(TRIM(?))
+              OR c.id IN (
+                SELECT cca.chamber_id
+                FROM chamber_client_assignments cca
+                WHERE LOWER(TRIM(cca.warehouse_name)) = LOWER(TRIM(?))
+                  AND (cca.status IS NULL OR cca.status = 'active')
+              )
            ORDER BY c.name ASC`,
-          [warehouseName]
+          [warehouseName, warehouseName]
         );
         warehouseChambers = whRows || [];
+
+        try {
+          const [acts] = await db.query(
+            `SELECT description FROM do_operator_activities
+             WHERE LOWER(TRIM(operator_email)) = LOWER(TRIM(?))
+               AND action = 'ADD_CHAMBER'
+             ORDER BY id DESC
+             LIMIT 30`,
+            [req.user.email]
+          );
+          const names = new Set();
+          const ids = new Set();
+          (acts || []).forEach((a) => {
+            const desc = String(a.description || '');
+            const nm = desc.match(/chamber "([^"]+)"/i);
+            if (nm?.[1]) names.add(String(nm[1]).trim().toLowerCase());
+            const idm = desc.match(/\(id:\s*(\d+)\)/i);
+            if (idm?.[1]) ids.add(Number(idm[1]));
+          });
+          if (names.size || ids.size) {
+            const [extra] = await db.query(
+              'SELECT id, name, chamber_type, warehouse_name FROM chambers'
+            );
+            const byId = new Map((warehouseChambers || []).map((c) => [Number(c.id), c]));
+            for (const c of extra || []) {
+              const match =
+                ids.has(Number(c.id)) ||
+                names.has(String(c.name || '').trim().toLowerCase());
+              if (!match) continue;
+              byId.set(Number(c.id), {
+                id: c.id,
+                name: c.name,
+                chamber_type: c.chamber_type
+              });
+              // Backfill warehouse so future loads are simple
+              if (warehouseName && !String(c.warehouse_name || '').trim()) {
+                await db.query('UPDATE chambers SET warehouse_name = ? WHERE id = ?', [
+                  warehouseName,
+                  c.id
+                ]);
+              }
+            }
+            warehouseChambers = Array.from(byId.values()).sort((a, b) =>
+              String(a.name).localeCompare(String(b.name), undefined, { numeric: true })
+            );
+          }
+        } catch (_) {
+          /* activity backfill optional */
+        }
       }
 
       if (warehouseChambers.length > 0) {
-        filteredRows = warehouseChambers.slice(0, limit);
+        // Always keep warehouse-owned / approved-add chambers;
+        // fill remaining slots from assignment-linked chambers up to limit.
+        const [ownedRows] = warehouseName
+          ? await db.query(
+              `SELECT id FROM chambers
+               WHERE LOWER(TRIM(IFNULL(warehouse_name, ''))) = LOWER(TRIM(?))`,
+              [warehouseName]
+            )
+          : [[]];
+        const ownedIds = new Set((ownedRows || []).map((r) => Number(r.id)));
+        const owned = warehouseChambers.filter((c) => ownedIds.has(Number(c.id)));
+        const rest = warehouseChambers.filter((c) => !ownedIds.has(Number(c.id)));
+        const maxKeep = Math.max(limit, owned.length);
+        filteredRows = [...owned, ...rest].slice(0, maxKeep);
       } else {
         // Empty DO setup: bootstrap numbered Chamber 1..N (legacy), not other warehouses' chambers
         const [existingAll] = await db.query(
@@ -247,7 +316,9 @@ exports.getChambers = async (req, res) => {
         }
       }
     } else {
-      const [rows] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY name ASC');
+      const [rows] = await db.query(
+        'SELECT id, name, chamber_type, warehouse_name FROM chambers ORDER BY name ASC'
+      );
       filteredRows = rows;
     }
 
@@ -320,20 +391,41 @@ exports.getAssignments = async (req, res) => {
       ? await db.query(query)
       : await db.query(query, [warehouse_name, warehouse_name, warehouse_name]);
 
+    const normalizeAssignmentStatus = (raw) => {
+      const s = String(raw || 'active').trim().toLowerCase();
+      if (
+        s === 'inactive' ||
+        s === 'deactive' ||
+        s === 'deactivated' ||
+        s === 'disabled' ||
+        s === '0' ||
+        s === 'false'
+      ) {
+        return 'inactive';
+      }
+      return 'active';
+    };
+
+    const filterWh = String(warehouse_name || '').trim().toLowerCase();
+    const assignmentRank = (row) => {
+      const wh = String(row.warehouse_name || '').trim().toLowerCase();
+      const exactWh = filterWh ? (wh === filterWh ? 2 : wh ? 1 : 0) : wh ? 1 : 0;
+      const inactiveBoost = normalizeAssignmentStatus(row.status) === 'inactive' ? 1 : 0;
+      // Prefer exact warehouse match; within same match, prefer inactive so Deactive is visible
+      return exactWh * 10 + inactiveBoost;
+    };
+
     const deduped = [];
     const seen = new Map();
     for (const row of rows || []) {
-      const key = `${row.chamber_id}|${String(row.client_name || '').trim().toLowerCase()}`;
-      if (!String(row.client_name || '').trim()) continue;
-      const status = String(row.status || 'active').trim().toLowerCase() === 'inactive' ? 'inactive' : 'active';
+      const clientKey = String(row.client_name || '').trim().toLowerCase();
+      if (!clientKey) continue;
+      const status = normalizeAssignmentStatus(row.status);
+      const key = `${row.chamber_id}|${clientKey}`;
+      const next = { ...row, status };
       const prev = seen.get(key);
-      if (!prev) {
-        seen.set(key, { ...row, status });
-        continue;
-      }
-      const prevInactive = String(prev.status || 'active').toLowerCase() === 'inactive';
-      if (prevInactive && status === 'active') {
-        seen.set(key, { ...row, status: 'active' });
+      if (!prev || assignmentRank(next) >= assignmentRank(prev)) {
+        seen.set(key, next);
       }
     }
     seen.forEach((v) => deduped.push(v));
@@ -918,12 +1010,18 @@ exports.createChamber = async (req, res) => {
 
     if (req.user && req.user.role === 'do_operator') {
       let limit = 4;
+      let warehouseName = String(req.user.warehouse_name || '').trim() || null;
       try {
         const [userRows] = await db.query(
-          'SELECT chamber_limit FROM do_operators WHERE email = ? LIMIT 1',
+          'SELECT chamber_limit, warehouse_name FROM do_operators WHERE email = ? LIMIT 1',
           [req.user.email]
         );
-        if (userRows.length > 0) limit = parseInt(userRows[0].chamber_limit || 4, 10);
+        if (userRows.length > 0) {
+          limit = parseInt(userRows[0].chamber_limit || 4, 10);
+          if (userRows[0].warehouse_name) {
+            warehouseName = String(userRows[0].warehouse_name).trim() || null;
+          }
+        }
       } catch (_) {
         limit = parseInt(req.user.chamber_limit || 4, 10);
       }
@@ -947,7 +1045,9 @@ exports.createChamber = async (req, res) => {
         });
       }
 
-      let [existing] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY id ASC');
+      let [existing] = await db.query(
+        'SELECT id, name, chamber_type, warehouse_name FROM chambers ORDER BY id ASC'
+      );
       const existingByName = existing.find(
         (c) => String(c.name || '').toLowerCase() === name.toLowerCase()
       );
@@ -970,7 +1070,18 @@ exports.createChamber = async (req, res) => {
         return limit;
       };
 
+      const bindWarehouse = async (chamberId) => {
+        if (!warehouseName || !chamberId) return;
+        await db.query(
+          `UPDATE chambers
+           SET warehouse_name = COALESCE(NULLIF(TRIM(warehouse_name), ''), ?)
+           WHERE id = ?`,
+          [warehouseName, chamberId]
+        );
+      };
+
       if (existingByName) {
+        await bindWarehouse(existingByName.id);
         await ensureIncluded(existingByName.id);
         try {
           await consumeGrantedPermission(req.user.email, 'ChamberMaster', permId, 'Edit');
@@ -981,7 +1092,8 @@ exports.createChamber = async (req, res) => {
           data: {
             id: existingByName.id,
             name: existingByName.name,
-            chamber_type: existingByName.chamber_type
+            chamber_type: existingByName.chamber_type,
+            warehouse_name: warehouseName || existingByName.warehouse_name || null
           },
           chamber_limit: limit
         });
@@ -1000,8 +1112,14 @@ exports.createChamber = async (req, res) => {
         } catch (_) {}
       }
 
-      const [result] = await db.query('INSERT INTO chambers (name, chamber_type) VALUES (?, ?)', [name, chamber_type]);
-      existing = [...existing, { id: result.insertId, name, chamber_type }];
+      const [result] = await db.query(
+        'INSERT INTO chambers (name, chamber_type, warehouse_name) VALUES (?, ?, ?)',
+        [name, chamber_type, warehouseName]
+      );
+      existing = [
+        ...existing,
+        { id: result.insertId, name, chamber_type, warehouse_name: warehouseName }
+      ];
       await ensureIncluded(result.insertId);
 
       try {
@@ -1024,7 +1142,12 @@ exports.createChamber = async (req, res) => {
       return res.status(201).json({
         success: true,
         message: 'Chamber created successfully.',
-        data: { id: result.insertId, name, chamber_type },
+        data: {
+          id: result.insertId,
+          name,
+          chamber_type,
+          warehouse_name: warehouseName
+        },
         chamber_limit: limit
       });
     }

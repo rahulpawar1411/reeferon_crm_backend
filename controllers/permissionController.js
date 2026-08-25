@@ -148,21 +148,34 @@ async function applyApprovedChamberAdd(operatorEmail, requestDescription, record
     // Still allow if description has the name (legacy / hash drift)
   }
 
-  let chamberId = null;
-  const [dup] = await db.query('SELECT id, name FROM chambers WHERE name = ? LIMIT 1', [name]);
-  if (dup.length > 0) {
-    chamberId = dup[0].id;
-  } else {
-    const [result] = await db.query('INSERT INTO chambers (name) VALUES (?)', [name]);
-    chamberId = result.insertId;
-  }
-
   const [userRows] = await db.query(
-    'SELECT chamber_limit FROM do_operators WHERE email = ? LIMIT 1',
+    'SELECT chamber_limit, warehouse_name FROM do_operators WHERE email = ? LIMIT 1',
     [operatorEmail]
   );
   let limit = parseInt(userRows[0]?.chamber_limit || 4, 10);
   if (!Number.isFinite(limit) || limit < 1) limit = 4;
+  const warehouseName = String(userRows[0]?.warehouse_name || '').trim() || null;
+
+  let chamberId = null;
+  const [dup] = await db.query('SELECT id, name, warehouse_name FROM chambers WHERE name = ? LIMIT 1', [
+    name
+  ]);
+  if (dup.length > 0) {
+    chamberId = dup[0].id;
+    // Bind existing chamber to this DO warehouse so it appears on DO screen
+    if (warehouseName && !String(dup[0].warehouse_name || '').trim()) {
+      await db.query('UPDATE chambers SET warehouse_name = ? WHERE id = ?', [
+        warehouseName,
+        chamberId
+      ]);
+    }
+  } else {
+    const [result] = await db.query(
+      'INSERT INTO chambers (name, warehouse_name) VALUES (?, ?)',
+      [name, warehouseName]
+    );
+    chamberId = result.insertId;
+  }
 
   const [all] = await db.query('SELECT id, name FROM chambers ORDER BY id ASC');
   let picked = pickDoChambers(all, limit);
@@ -175,10 +188,10 @@ async function applyApprovedChamberAdd(operatorEmail, requestDescription, record
     ) {
       newLimit += 1;
     }
-    await db.query(
-      'UPDATE do_operators SET chamber_limit = ? WHERE email = ?',
-      [newLimit, operatorEmail]
-    );
+    await db.query('UPDATE do_operators SET chamber_limit = ? WHERE email = ?', [
+      newLimit,
+      operatorEmail
+    ]);
     limit = newLimit;
   }
 
