@@ -850,6 +850,22 @@ exports.addAssignment = async (req, res) => {
       [resolvedChamberId, finalClientName, finalClientCode, warehouse_name, warehouse_code, remark || null, resolvedType]
     );
 
+    if (req.user?.role === 'do_operator') {
+      try {
+        const { consumeGrantedPermission, clientMasterPermissionId } = require('./permissionController');
+        const nameForPerm = finalClientName || client_name || bodyClientCode || '';
+        const permIds = [
+          clientMasterPermissionId(resolvedChamberId, 'add', nameForPerm),
+          clientMasterPermissionId(chamber_id, 'add', nameForPerm),
+          clientMasterPermissionId(resolvedChamberId, 'edit', client_name || '', nameForPerm),
+          clientMasterPermissionId(chamber_id, 'edit', client_name || '', nameForPerm)
+        ];
+        for (const permId of [...new Set(permIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0))]) {
+          await consumeGrantedPermission(req.user.email, 'ClientMaster', permId, 'Edit');
+        }
+      } catch (_) {}
+    }
+
     const skipActivity = req.body && (req.body.skip_activity === true || req.body.skip_activity === 1 || req.body.skip_activity === 'true');
 
     // Write Activity Log
@@ -961,6 +977,18 @@ exports.deleteAssignment = async (req, res) => {
         warehouse_code || null, warehouse_code || '', warehouse_name || null
       ]
     );
+
+    if (req.user?.role === 'do_operator') {
+      try {
+        const { consumeGrantedPermission, clientMasterPermissionId } = require('./permissionController');
+        const permId = clientMasterPermissionId(
+          resolvedChamberId,
+          'delete',
+          client_name || client_code || ''
+        );
+        await consumeGrantedPermission(req.user.email, 'ClientMaster', permId, 'Delete');
+      } catch (_) {}
+    }
 
     const skipActivity = (req.body && (req.body.skip_activity === true || req.body.skip_activity === 1 || req.body.skip_activity === 'true'))
       || (req.query && (req.query.skip_activity === 'true' || req.query.skip_activity === '1'));

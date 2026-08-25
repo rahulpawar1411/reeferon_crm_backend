@@ -537,10 +537,23 @@ exports.createPermissionRequest = async (req, res) => {
         });
       }
       if (latestAction === grantActionType && String(record_type) !== 'ChamberType') {
-        return res.status(400).json({ 
-          error: `Permission to perform this action has already been granted.`, 
-          request: { status: 'Approved' } 
-        });
+        // ClientMaster / ChamberMaster: SA already applied on approve — leftover GRANT
+        // must not let DO skip a fresh allow on the next change (common on live DBs).
+        if (record_type === 'ClientMaster' || record_type === 'ChamberMaster') {
+          try {
+            await exports.consumeGrantedPermission(
+              operator_email,
+              record_type,
+              record_id,
+              action === 'Edit' ? 'Edit' : 'Delete'
+            );
+          } catch (_) {}
+        } else {
+          return res.status(400).json({
+            error: `Permission to perform this action has already been granted.`,
+            request: { status: 'Approved' }
+          });
+        }
       }
     }
 
@@ -862,6 +875,19 @@ exports.updatePermissionRequestStatus = async (req, res) => {
       record_id,
       storedRemark
     );
+
+    // ClientMaster is applied on approve — consume GRANT now so DO cannot
+    // reuse the same allow for the next master change (live DB stale GRANT bug).
+    if (status === 'Approved' && record_type === 'ClientMaster') {
+      try {
+        await exports.consumeGrantedPermission(
+          operator_email,
+          'ClientMaster',
+          record_id,
+          isEdit ? 'Edit' : 'Delete'
+        );
+      } catch (_) {}
+    }
 
     // DO push when app is closed (Approved / Denied)
     setImmediate(() => {
