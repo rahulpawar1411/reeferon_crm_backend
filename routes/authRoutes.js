@@ -27,4 +27,8 @@ router.post(
   authController.changeSuperAdminPassword
 );
 
+// Sub-Admin Expo push token (permission alerts when app is closed)
+router.post('/push-token', verifyToken, requireRole(['sub_admin', 'do_operator']), authController.registerPushToken);
+router.delete('/push-token', verifyToken, requireRole(['sub_admin', 'do_operator']), authController.clearPushToken);
+
 module.exports = router;

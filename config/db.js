@@ -271,6 +271,10 @@ async function testDbConnection() {
         await pool.query('ALTER TABLE do_operators ADD COLUMN warehouse_code VARCHAR(50) DEFAULT NULL');
         console.log('🌱 Added column warehouse_code to do_operators.');
       }
+      if (!colNames.includes('expo_push_token')) {
+        await pool.query('ALTER TABLE do_operators ADD COLUMN expo_push_token VARCHAR(255) DEFAULT NULL');
+        console.log('🌱 Added column expo_push_token to do_operators.');
+      }
     } catch (tblErr) {
       console.warn('⚠️ Table do_operators verification skipped:', tblErr.message);
     }
@@ -392,10 +396,23 @@ async function testDbConnection() {
           password VARCHAR(255) NOT NULL,
           full_name VARCHAR(150) DEFAULT NULL,
           phone_no VARCHAR(20) DEFAULT NULL,
+          expo_push_token VARCHAR(255) DEFAULT NULL,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP NULL DEFAULT NULL
         )
       `);
+      try {
+        const [saCols] = await pool.query('SHOW COLUMNS FROM sub_admins');
+        const saColNames = saCols.map((c) => c.Field);
+        if (!saColNames.includes('expo_push_token')) {
+          await pool.query(
+            'ALTER TABLE sub_admins ADD COLUMN expo_push_token VARCHAR(255) DEFAULT NULL AFTER phone_no'
+          );
+          console.log('🌱 Added expo_push_token to sub_admins.');
+        }
+      } catch (colErr) {
+        console.warn('⚠️ sub_admins expo_push_token column check skipped:', colErr.message);
+      }
       console.log('🌱 Verified sub_admins table (mobile full-access, separate from customers).');
     } catch (saErr) {
       console.warn('⚠️ Table sub_admins verification skipped:', saErr.message);

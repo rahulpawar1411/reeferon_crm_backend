@@ -558,5 +558,130 @@ exports.getMe = async (req, res) => {
   }
 };
 
+/**
+ * 6. Register Expo push token (Sub-Admin + DO — alerts when app is closed).
+ */
+exports.registerPushToken = async (req, res) => {
+  try {
+    const role = req.user?.role;
+    if (role !== 'sub_admin' && role !== 'do_operator') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only Sub-Admin or DO accounts can register a push token.'
+      });
+    }
+
+    const token = String(req.body?.expo_push_token || req.body?.token || '').trim();
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'expo_push_token is required.'
+      });
+    }
+    if (!token.startsWith('ExponentPushToken[') && !token.startsWith('ExpoPushToken[')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid Expo push token format.'
+      });
+    }
+
+    const email = req.user.email;
+    const table = role === 'sub_admin' ? 'sub_admins' : 'do_operators';
+
+    // Device moved accounts: same physical token should only belong to this user
+    try {
+      await db.query(
+        `UPDATE sub_admins SET expo_push_token = NULL, updated_at = NOW()
+         WHERE expo_push_token = ? AND email <> ?`,
+        [token, email]
+      );
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      await db.query(
+        `UPDATE do_operators SET expo_push_token = NULL
+         WHERE expo_push_token = ? AND email <> ?`,
+        [token, email]
+      );
+    } catch (_) {
+      /* ignore */
+    }
+
+    if (table === 'sub_admins') {
+      await db.query(
+        'UPDATE sub_admins SET expo_push_token = ?, updated_at = NOW() WHERE email = ? LIMIT 1',
+        [token, email]
+      );
+    } else {
+      try {
+        await db.query(
+          'UPDATE do_operators SET expo_push_token = ?, updated_at = NOW() WHERE email = ? LIMIT 1',
+          [token, email]
+        );
+      } catch (err) {
+        if (/Unknown column 'updated_at'/i.test(String(err.message || ''))) {
+          await db.query(
+            'UPDATE do_operators SET expo_push_token = ? WHERE email = ? LIMIT 1',
+            [token, email]
+          );
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    return res.status(200).json({ success: true, message: 'Push token saved.', role });
+  } catch (error) {
+    return respondAuthServerError(res, error, {
+      checkpoint: 'registerPushToken',
+      req,
+      clientMessage: 'Failed to save push token.'
+    });
+  }
+};
+
+/**
+ * Clear push token on logout (stops alerts on this device).
+ */
+exports.clearPushToken = async (req, res) => {
+  try {
+    const role = req.user?.role;
+    if (role !== 'sub_admin' && role !== 'do_operator') {
+      return res.status(200).json({ success: true });
+    }
+    const email = req.user.email;
+    if (role === 'sub_admin') {
+      await db.query(
+        'UPDATE sub_admins SET expo_push_token = NULL, updated_at = NOW() WHERE email = ? LIMIT 1',
+        [email]
+      );
+    } else {
+      try {
+        await db.query(
+          'UPDATE do_operators SET expo_push_token = NULL, updated_at = NOW() WHERE email = ? LIMIT 1',
+          [email]
+        );
+      } catch (err) {
+        if (/Unknown column 'updated_at'/i.test(String(err.message || ''))) {
+          await db.query(
+            'UPDATE do_operators SET expo_push_token = NULL WHERE email = ? LIMIT 1',
+            [email]
+          );
+        } else {
+          throw err;
+        }
+      }
+    }
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return respondAuthServerError(res, error, {
+      checkpoint: 'clearPushToken',
+      req,
+      clientMessage: 'Failed to clear push token.'
+    });
+  }
+};
+
 // Keep helper export for tests / future role-specific routes
 exports.getTableForRole = getTableForRole;

@@ -22,6 +22,9 @@ router.get('/inventory-reconciliation', dashboardController.getInventoryReconcil
 // GET /api/dashboard/daily-inventory-deltas - Fetch daily inventory box comparisons (deltas)
 router.get('/daily-inventory-deltas', dashboardController.getDailyInventoryDeltas);
 
+// GET /api/dashboard/client-month-box-sheet - 1-month Excel sheet for one client lot
+router.get('/client-month-box-sheet', dashboardController.getClientMonthBoxSheet);
+
 // GET /api/dashboard/do-task-overview - Warehouse-wise DO completed / pending / overdue
 router.get('/do-task-overview', dashboardController.getDoTaskOverview);
 

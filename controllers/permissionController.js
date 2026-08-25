@@ -9,6 +9,8 @@
 const db = require('../config/db');
 const { logActivity, extractRemark, getActorLabel } = require('../utils/logger');
 const { handleControllerError } = require('../utils/errorHandler');
+const { notifySubAdminsPermissionRequest, notifyDoOperatorPermissionDecision } = require('../utils/notifySubAdmins');
+const { enrichActivityWithDecisionAudit } = require('../utils/decisionAudit');
 
 const PERMISSION_LOG_TYPES = "('Chamber', 'Inward', 'Outward', 'ChamberMaster', 'MasterSetup', 'ClientMaster', 'ChamberType')";
 
@@ -481,7 +483,7 @@ exports.getPermissionRequests = async (req, res) => {
     for (const row of rows || []) {
       if (!row || row.id == null || seen.has(row.id)) continue;
       seen.add(row.id);
-      unique.push(row);
+      unique.push(enrichActivityWithDecisionAudit(row));
     }
     return res.json(dedupePendingPermissionRequests(unique));
   } catch (err) {
@@ -617,6 +619,15 @@ exports.createPermissionRequest = async (req, res) => {
       ORDER BY id DESC LIMIT 1
     `, [operator_email, reqActionType, record_type, record_id]);
 
+    // Sub-Admin push (works when their app is closed)
+    setImmediate(() => {
+      notifySubAdminsPermissionRequest({
+        operatorEmail: operator_email,
+        recordType: record_type,
+        action
+      }).catch(() => {});
+    });
+
     return res.status(201).json({
       message: 'Permission request submitted successfully.',
       requestId: inserted[0] ? inserted[0].id : null
@@ -634,10 +645,17 @@ exports.createPermissionRequest = async (req, res) => {
 exports.updatePermissionRequestStatus = async (req, res) => {
   try {
     const { id } = req.params; // The ID of the REQUEST log entry
-    const { status, remark: saRemarkRaw } = req.body; // 'Approved' or 'Denied' + optional SA remark
+    const { status, remark: saRemarkRaw } = req.body; // 'Approved' or 'Denied' + remark (required on Deny)
 
     if (!['Approved', 'Denied'].includes(status)) {
       return res.status(400).json({ error: 'Invalid status. Must be Approved or Denied.' });
+    }
+
+    const saRemarkEarly = saRemarkRaw != null ? String(saRemarkRaw).trim() : '';
+    if (status === 'Denied' && !saRemarkEarly) {
+      return res.status(400).json({
+        error: 'A remark is required when denying a permission request.'
+      });
     }
 
     // Fetch the request log details to identify who, what, and which ID was requested
@@ -817,7 +835,7 @@ exports.updatePermissionRequestStatus = async (req, res) => {
       `${actionWord} ${outcome}`,
       detailParts.join(' · '),
       requestRemark ? `Request remark: ${requestRemark}` : null,
-      saRemark ? `SA remark: ${saRemark}` : null,
+      saRemark ? `Admin remark: ${saRemark}` : null,
       saActor ? `Decided by: ${saActor}` : null
     ].filter(Boolean);
     const approvalMessage = approvalParts.join(' · ');
@@ -831,6 +849,16 @@ exports.updatePermissionRequestStatus = async (req, res) => {
       record_id,
       storedRemark
     );
+
+    // DO push when app is closed (Approved / Denied)
+    setImmediate(() => {
+      notifyDoOperatorPermissionDecision({
+        operatorEmail: operator_email,
+        status,
+        recordType: record_type,
+        adminRemark: saRemark || null
+      }).catch(() => {});
+    });
 
     return res.json({
       message: `Permission request ${status.toLowerCase()} successfully.`,
@@ -1010,12 +1038,16 @@ exports.getRecordPermissionHistory = async (req, res) => {
       const isDelete = /DELETE|GRANT_DELETE|REQUEST_DELETE|USE_DELETE/i.test(row.action);
 
       let eventLabel = row.decision || row.action;
+      const audit = enrichActivityWithDecisionAudit(row);
+      const actorBit = audit.decided_by_name || audit.decided_by_email
+        ? ` by ${[audit.decided_by_role, audit.decided_by_name].filter(Boolean).join(' ')}${audit.decided_by_email ? ` (${audit.decided_by_email})` : ''}`
+        : '';
       if (row.action === 'REQUEST_EDIT') eventLabel = 'DO requested Edit allow';
       else if (row.action === 'REQUEST_DELETE') eventLabel = 'DO requested Delete allow';
-      else if (row.action === 'GRANT_PERMISSION') eventLabel = 'Super Admin ALLOWED Edit';
-      else if (row.action === 'GRANT_DELETE') eventLabel = 'Super Admin ALLOWED Delete';
-      else if (row.action === 'DENY_PERMISSION') eventLabel = 'Super Admin DENIED Edit';
-      else if (row.action === 'DENY_DELETE') eventLabel = 'Super Admin DENIED Delete';
+      else if (row.action === 'GRANT_PERMISSION') eventLabel = `Edit ALLOWED${actorBit}`;
+      else if (row.action === 'GRANT_DELETE') eventLabel = `Delete ALLOWED${actorBit}`;
+      else if (row.action === 'DENY_PERMISSION') eventLabel = `Edit DENIED${actorBit}`;
+      else if (row.action === 'DENY_DELETE') eventLabel = `Delete DENIED${actorBit}`;
       else if (row.action === 'USE_EDIT_PERMISSION') eventLabel = 'DO used Edit permission';
       else if (row.action === 'USE_DELETE_PERMISSION') eventLabel = 'DO used Delete permission';
       else if (row.action === 'UPDATE') eventLabel = 'Record updated (after allow)';
@@ -1030,8 +1062,11 @@ exports.getRecordPermissionHistory = async (req, res) => {
         operator_email: row.operator_email,
         description: desc,
         remark: requestRemark || null,
-        sa_remark: saRemarkMatch ? saRemarkMatch[1].trim() : null,
-        decided_by: decidedByMatch ? decidedByMatch[1].trim() : null,
+        sa_remark: audit.admin_remark || (saRemarkMatch ? saRemarkMatch[1].trim() : null),
+        decided_by: audit.decided_by || (decidedByMatch ? decidedByMatch[1].trim() : null),
+        decided_by_name: audit.decided_by_name,
+        decided_by_email: audit.decided_by_email,
+        decided_by_role: audit.decided_by_role,
         changes: changesText || null,
         change_rows,
         date: row.created_at,

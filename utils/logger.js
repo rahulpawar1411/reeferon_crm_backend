@@ -19,6 +19,17 @@ exports.getActorLabel = async (user) => {
       /* ignore lookup failures */
     }
   }
+  if (!name && user.role === 'sub_admin') {
+    try {
+      const [rows] = await db.query(
+        'SELECT full_name FROM sub_admins WHERE email = ? LIMIT 1',
+        [user.email]
+      );
+      name = String(rows[0]?.full_name || '').trim();
+    } catch (_) {
+      /* ignore */
+    }
+  }
 
   if (user.role === 'super_admin') {
     return name ? `Super Admin ${name} (${user.email})` : `Super Admin (${user.email})`;

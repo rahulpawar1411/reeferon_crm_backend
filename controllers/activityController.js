@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const { handleControllerError } = require('../utils/errorHandler');
 const { parsePagination, sendPaginated } = require('../utils/pagination');
+const { enrichActivityWithDecisionAudit } = require('../utils/decisionAudit');
 
 /**
  * Paginated operator activity / security / system logs.
@@ -140,7 +141,13 @@ exports.getActivityLogs = async (req, res) => {
       [...params, limit, offset]
     );
 
-    return sendPaginated(res, rows, total, page, limit);
+    return sendPaginated(
+      res,
+      (rows || []).map((row) => enrichActivityWithDecisionAudit(row)),
+      total,
+      page,
+      limit
+    );
   } catch (err) {
     return handleControllerError(res, err, {
       checkpoint: 'getActivityLogs',

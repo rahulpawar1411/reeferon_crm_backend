@@ -1,5 +1,13 @@
+/**
+ * Master code/name resolver for log writes (inward / outward / chamber temp).
+ *
+ * Lookup order: explicit code → name (+ warehouse when needed).
+ * Returns stable warehouse_code / client_code so reports and inventory stay consistent
+ * even when the UI only sends human-readable names.
+ */
 const db = require('../config/db');
 
+/** Resolve warehouse_master row by WH-code or exact name. */
 async function resolveWarehouseByCodeOrName({ warehouse_code, warehouse_name }) {
   const code = String(warehouse_code || '').trim();
   const name = String(warehouse_name || '').trim();

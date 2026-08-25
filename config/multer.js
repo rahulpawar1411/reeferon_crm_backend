@@ -36,8 +36,11 @@ const uploadBuffer = (buffer, folder, publicId) => {
 };
 
 /**
- * Creates custom upload middleware that dynamically routes to Cloudinary or Local Disk.
- * When UPLOAD_TO_CLOUDINARY=true, it saves to BOTH local disk and Cloudinary (returning Cloudinary URL to db).
+ * Upload middleware — Cloudinary OR local disk (env switch).
+ *
+ * UPLOAD_TO_CLOUDINARY=true  → local disk + Cloudinary; DB gets Cloudinary URL (current DEV).
+ * UPLOAD_TO_CLOUDINARY=false → local disk only under uploads/; DB gets /uploads/... path
+ *   → planned for PRODUCTION deploy (no Cloudinary). Flip the .env flag at deploy time.
  */
 const createUploader = (folderName, filePrefix) => {
   const uploadToCloudinary = process.env.UPLOAD_TO_CLOUDINARY === 'true';

@@ -1,7 +1,20 @@
+// ====================================================================
+// Master Data Controller (backend/controllers/masterController.js)
+// --------------------------------------------------------------------
+// Catalog masters (not DO daily tasks):
+//   • warehouse_master — sites (WH-CODE + name + city)
+//   • client_master    — companies, optionally tied to a warehouse
+//
+// Who: Super Admin (web) + Sub Admin (mobile Admin → Master).
+// DO daily work uses chamber_client_assignments instead (see chamberController).
+// Log writes resolve codes via utils/masterResolver.js.
+// ====================================================================
+
 const db = require('../config/db');
 const { handleControllerError } = require('../utils/errorHandler');
 const { generateClientCode } = require('../utils/clientCodeGenerator');
 
+/** Normalize WH-/CL- style codes; empty string if invalid. */
 function normalizeCode(value, prefix) {
   const v = String(value || '').trim().toUpperCase();
   if (!v) return '';
@@ -10,6 +23,7 @@ function normalizeCode(value, prefix) {
   return v;
 }
 
+/** GET /api/masters/warehouses — list catalog warehouses (active by default). */
 exports.listWarehouses = async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
@@ -38,6 +52,7 @@ exports.listWarehouses = async (req, res) => {
   }
 };
 
+/** POST /api/masters/warehouses — create warehouse_master row (WH- code). */
 exports.createWarehouse = async (req, res) => {
   try {
     const warehouse_code = normalizeCode(req.body.warehouse_code, 'WH');
@@ -100,6 +115,7 @@ exports.updateWarehouse = async (req, res) => {
   }
 };
 
+/** GET /api/masters/clients — catalog clients (optional warehouse / active filter). */
 exports.listClients = async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
@@ -136,6 +152,7 @@ exports.listClients = async (req, res) => {
   }
 };
 
+/** POST /api/masters/clients — create client_master row (CL- code). */
 exports.createClient = async (req, res) => {
   try {
     const client_name = String(req.body.client_name || '').trim();

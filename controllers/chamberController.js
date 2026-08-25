@@ -1,7 +1,13 @@
 // ====================================================================
 // Chamber Controller (controllers/chamberController.js)
 // --------------------------------------------------------------------
-// Chambers list, client assignments, DO inspections (multipart + photo).
+// Operational masters (DO daily graph), separate from catalog /api/masters:
+//   • chambers — physical rooms (name is globally UNIQUE today)
+//   • chamber_client_assignments — which clients are active in a chamber
+//     scoped by warehouse_name (this is what DO tasks / logs use)
+//
+// DO getChambers / getAssignments: filter by THAT DO's warehouse — never
+// return another warehouse's chambers just because names match "Chamber 1".
 // Catch blocks → handleControllerError (no raw error.message to clients).
 // ====================================================================
 
@@ -22,7 +28,8 @@ const {
 
 /**
  * Ensure global master has Chamber 1 .. Chamber N (shared numbered list).
- * Used when Super Admin assigns chamber_limit to a DO.
+ * Bootstrap only when a DO has no warehouse assignments yet.
+ * Prefer unique names per warehouse when creating new chambers.
  */
 async function ensureNumberedChambers(limit) {
   const n = Math.max(1, Math.min(parseInt(limit, 10) || 4, 500));
@@ -173,15 +180,22 @@ function calculateVariance(entryDateStr, inspectionTimeStr, captureDate) {
 // 1. Fetch all chambers
 exports.getChambers = async (req, res) => {
   try {
-    // DO: ensure Chamber 1..chamber_limit exist, then return exactly those
+    // DO: return only chambers assigned to THIS DO's warehouse (not global Chamber 1..N).
     let filteredRows;
     let appliedLimit = null;
     if (req.user && req.user.role === 'do_operator') {
       let limit = 4;
+      let warehouseName = String(req.user.warehouse_name || '').trim();
       try {
-        const [userRows] = await db.query('SELECT chamber_limit FROM do_operators WHERE email = ? LIMIT 1', [req.user.email]);
+        const [userRows] = await db.query(
+          'SELECT chamber_limit, warehouse_name FROM do_operators WHERE email = ? LIMIT 1',
+          [req.user.email]
+        );
         if (userRows.length > 0) {
           limit = parseInt(userRows[0].chamber_limit || 4, 10);
+          if (userRows[0].warehouse_name) {
+            warehouseName = String(userRows[0].warehouse_name).trim();
+          }
         }
       } catch (dbErr) {
         limit = parseInt(req.user.chamber_limit || 4, 10);
@@ -189,15 +203,48 @@ exports.getChambers = async (req, res) => {
       if (!Number.isFinite(limit) || limit < 1) limit = 4;
       appliedLimit = limit;
 
-      // Only bootstrap Chamber 1..N when none exist yet (so DO delete can stick)
-      const [existingAll] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY id ASC');
-      const picked = pickDoChambers(existingAll, limit);
-      if (picked.length === 0) {
-        await ensureNumberedChambers(limit);
-        const [rows] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY id ASC');
-        filteredRows = pickDoChambers(rows, limit);
+      // Prefer chambers that have active assignments for this DO warehouse
+      let warehouseChambers = [];
+      if (warehouseName) {
+        const [whRows] = await db.query(
+          `SELECT DISTINCT c.id, c.name, c.chamber_type
+           FROM chambers c
+           INNER JOIN chamber_client_assignments cca ON cca.chamber_id = c.id
+           WHERE LOWER(TRIM(cca.warehouse_name)) = LOWER(TRIM(?))
+             AND (cca.status IS NULL OR cca.status = 'active')
+           ORDER BY c.name ASC`,
+          [warehouseName]
+        );
+        warehouseChambers = whRows || [];
+      }
+
+      if (warehouseChambers.length > 0) {
+        filteredRows = warehouseChambers.slice(0, limit);
       } else {
-        filteredRows = picked;
+        // Empty DO setup: bootstrap numbered Chamber 1..N (legacy), not other warehouses' chambers
+        const [existingAll] = await db.query(
+          'SELECT id, name, chamber_type FROM chambers ORDER BY id ASC'
+        );
+        const picked = pickDoChambers(existingAll, limit);
+        if (picked.length === 0) {
+          await ensureNumberedChambers(limit);
+          const [rows] = await db.query(
+            'SELECT id, name, chamber_type FROM chambers ORDER BY id ASC'
+          );
+          filteredRows = pickDoChambers(rows, limit);
+        } else {
+          // Only keep numbered Chamber N for empty-warehouse bootstrap — never leak other WH named chambers
+          filteredRows = picked.filter((c) => chamberNumberFromName(c.name) != null).slice(0, limit);
+          if (filteredRows.length === 0) {
+            await ensureNumberedChambers(limit);
+            const [rows] = await db.query(
+              'SELECT id, name, chamber_type FROM chambers ORDER BY id ASC'
+            );
+            filteredRows = pickDoChambers(rows, limit).filter(
+              (c) => chamberNumberFromName(c.name) != null
+            );
+          }
+        }
       }
     } else {
       const [rows] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY name ASC');
@@ -218,7 +265,11 @@ exports.getChambers = async (req, res) => {
   }
 };
 
-// 2. Fetch all active client chamber assignments (Admin managed)
+/**
+ * GET /api/chambers/assignments
+ * Returns chamber ↔ client rows for DO tasks / Master Setup.
+ * DO: only their warehouse. SA/Sub Admin: optional ?warehouse_name= filter.
+ */
 exports.getAssignments = async (req, res) => {
   try {
     const isSpecialUser = req.user && (req.user.role === 'super_admin' || req.user.role === 'sub_admin');
@@ -1180,6 +1231,11 @@ exports.deleteChamber = async (req, res) => {
       "UPDATE chamber_client_assignments SET status = 'inactive' WHERE chamber_id = ?",
       [id]
     );
+    try {
+      await db.query('DELETE FROM chamber_client_assignments WHERE chamber_id = ?', [id]);
+    } catch (_) {
+      // Keep inactive rows if FK/history requires them
+    }
     await db.query('DELETE FROM chambers WHERE id = ?', [id]);
 
     try {

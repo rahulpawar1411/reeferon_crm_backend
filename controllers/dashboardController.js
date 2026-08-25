@@ -500,7 +500,23 @@ exports.getInventoryFilterOptions = async (req, res) => {
  */
 exports.getInventoryReconciliation = async (req, res) => {
   try {
-    const { search, warehouse } = req.query;
+    const { search, warehouse, client, view, page, limit, offset } = req.query;
+
+    const pageNum = (() => {
+      const n = parseInt(page, 10);
+      return Number.isFinite(n) && n > 0 ? n : 1;
+    })();
+    const limitNum = (() => {
+      const n = parseInt(limit, 10);
+      // Keep a safe clamp to prevent accidental huge loads
+      const safe = Number.isFinite(n) && n > 0 ? n : 50;
+      return Math.min(200, safe);
+    })();
+    const offsetNum = (() => {
+      const n = parseInt(offset, 10);
+      if (Number.isFinite(n) && n >= 0) return n;
+      return (pageNum - 1) * limitNum;
+    })();
 
     const sql = `
       SELECT 
@@ -588,12 +604,24 @@ exports.getInventoryReconciliation = async (req, res) => {
       filteredRows = filteredRows.filter(r => r.warehouse_name && r.warehouse_name.toLowerCase().trim() === warehouseLower);
     }
 
-    const clientFilter = req.query.client;
-    if (clientFilter && clientFilter !== 'All') {
-      const clientLower = String(clientFilter).toLowerCase().trim();
+    if (client && client !== 'All') {
+      const clientLower = String(client).toLowerCase().trim();
       filteredRows = filteredRows.filter(
         (r) => r.client_name && r.client_name.toLowerCase().trim() === clientLower
       );
+    }
+
+    // View filters (Reports)
+    const viewParam = String(view || '').toLowerCase().trim();
+    if (viewParam === 'mismatch') {
+      // Same rule as frontend:
+      // bal = max(0, calculated_balance), phys = max(0, physical_audit_count)
+      // mismatch if bal - phys !== 0
+      filteredRows = filteredRows.filter((r) => {
+        const bal = Math.max(0, Number(r.calculated_balance) || 0);
+        const phys = Math.max(0, Number(r.physical_audit_count) || 0);
+        return bal - phys !== 0;
+      });
     }
 
     if (search && search.trim() !== '') {
@@ -606,9 +634,16 @@ exports.getInventoryReconciliation = async (req, res) => {
       );
     }
 
+    const total = filteredRows.length;
+    const items = filteredRows.slice(offsetNum, offsetNum + limitNum);
     return res.status(200).json({
       success: true,
-      items: filteredRows
+      total,
+      page: pageNum,
+      limit: limitNum,
+      offset: offsetNum,
+      has_more: offsetNum + items.length < total,
+      items
     });
   } catch (error) {
     return handleControllerError(res, error, {
@@ -836,6 +871,267 @@ exports.getDailyInventoryDeltas = async (req, res) => {
       checkpoint: 'getDailyInventoryDeltas',
       req,
       clientMessage: 'Server error while calculating daily inventory deltas.'
+    });
+  }
+};
+
+/**
+ * GET CLIENT MONTH BOX SHEET
+ * Excel-style 1-month (default last 30 days) daily rows for one client lot:
+ * Date | Morning qty | Evening qty | Inward boxes | Outward boxes | Total (closing)
+ * Plus warehouse, chamber, warehouse supervisor (DO full_name).
+ */
+exports.getClientMonthBoxSheet = async (req, res) => {
+  try {
+    const clientName = String(req.query.client || req.query.client_name || '').trim();
+    const warehouseName = String(req.query.warehouse || req.query.warehouse_name || '').trim();
+    const chamberName = String(req.query.chamber || req.query.chamber_name || '').trim();
+
+    if (!clientName) {
+      return res.status(400).json({
+        success: false,
+        message: 'client (client_name) is required.'
+      });
+    }
+
+    const pad = (n) => String(n).padStart(2, '0');
+    const toYmd = (d) =>
+      `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    let toDate = String(req.query.toDate || '').trim() || toYmd(today);
+    let fromDate = String(req.query.fromDate || '').trim();
+    if (!fromDate) {
+      const from = new Date(today);
+      from.setDate(from.getDate() - 29); // 30 calendar days inclusive
+      fromDate = toYmd(from);
+    }
+    if (fromDate > toDate) {
+      const tmp = fromDate;
+      fromDate = toDate;
+      toDate = tmp;
+    }
+
+    const normalizeShift = (row) => {
+      const s = String(row.shift || '').trim();
+      if (/^morning$/i.test(s)) return 'Morning';
+      if (/^evening$/i.test(s)) return 'Evening';
+      const t = String(row.inspection_time || '').trim();
+      const tUp = t.toUpperCase();
+      if (/^10:00\b/.test(t) || tUp === '10:00 AM') return 'Morning';
+      if (/^16:00\b|^18:00\b/.test(t) || tUp.includes('04:00 PM') || tUp.includes('06:00 PM')) {
+        return 'Evening';
+      }
+      const hm = t.match(/^(\d{1,2}):(\d{2})/);
+      if (hm) {
+        let h = parseInt(hm[1], 10);
+        if (tUp.includes('PM') && h < 12) h += 12;
+        if (tUp.includes('AM') && h === 12) h = 0;
+        return h < 14 ? 'Morning' : 'Evening';
+      }
+      if (row.created_at) {
+        const d = new Date(row.created_at);
+        if (!Number.isNaN(d.getTime())) return d.getHours() < 14 ? 'Morning' : 'Evening';
+      }
+      return 'Morning';
+    };
+
+    // Chamber morning/evening audits for this lot
+    let chamberSql = `
+      SELECT
+        id,
+        DATE_FORMAT(entry_date, '%Y-%m-%d') AS entry_date,
+        client_name,
+        chamber_name,
+        warehouse_name,
+        box_count,
+        box_temp,
+        shift,
+        inspection_time,
+        created_at
+      FROM daily_chamber_temp_logs
+      WHERE LOWER(TRIM(client_name)) = LOWER(TRIM(?))
+        AND entry_date >= ?
+        AND entry_date <= ?
+    `;
+    const chamberParams = [clientName, fromDate, toDate];
+    if (warehouseName) {
+      chamberSql += ` AND LOWER(TRIM(IFNULL(warehouse_name,''))) = LOWER(TRIM(?)) `;
+      chamberParams.push(warehouseName);
+    }
+    if (chamberName && chamberName !== '-') {
+      chamberSql += ` AND LOWER(TRIM(IFNULL(chamber_name,''))) = LOWER(TRIM(?)) `;
+      chamberParams.push(chamberName);
+    }
+    chamberSql += ` ORDER BY entry_date ASC, id ASC `;
+    const [chamberRows] = await db.query(chamberSql, chamberParams);
+
+    // Inward boxes by date
+    let inwardSql = `
+      SELECT
+        DATE_FORMAT(inward_entry_date, '%Y-%m-%d') AS entry_date,
+        SUM(GREATEST(0, IFNULL(inward_received_boxes_qty, 0))) AS boxes
+      FROM inward_temp_logs
+      WHERE LOWER(TRIM(inward_client_name)) = LOWER(TRIM(?))
+        AND inward_entry_date >= ?
+        AND inward_entry_date <= ?
+    `;
+    const inwardParams = [clientName, fromDate, toDate];
+    if (warehouseName) {
+      inwardSql += ` AND LOWER(TRIM(IFNULL(warehouse_name,''))) = LOWER(TRIM(?)) `;
+      inwardParams.push(warehouseName);
+    }
+    inwardSql += ` GROUP BY DATE_FORMAT(inward_entry_date, '%Y-%m-%d') `;
+    const [inwardRows] = await db.query(inwardSql, inwardParams);
+
+    // Outward boxes by date
+    let outwardSql = `
+      SELECT
+        DATE_FORMAT(outward_entry_date, '%Y-%m-%d') AS entry_date,
+        SUM(GREATEST(0, IFNULL(outward_received_boxes_qty, 0))) AS boxes
+      FROM outward_temp_logs
+      WHERE LOWER(TRIM(outward_client_name)) = LOWER(TRIM(?))
+        AND outward_entry_date >= ?
+        AND outward_entry_date <= ?
+    `;
+    const outwardParams = [clientName, fromDate, toDate];
+    if (warehouseName) {
+      outwardSql += ` AND LOWER(TRIM(IFNULL(warehouse_name,''))) = LOWER(TRIM(?)) `;
+      outwardParams.push(warehouseName);
+    }
+    outwardSql += ` GROUP BY DATE_FORMAT(outward_entry_date, '%Y-%m-%d') `;
+    const [outwardRows] = await db.query(outwardSql, outwardParams);
+
+    // Warehouse supervisor = DO full_name for that warehouse
+    let supervisor_name = null;
+    let supervisor_email = null;
+    const whForSupervisor = warehouseName || String(chamberRows[0]?.warehouse_name || '').trim();
+    if (whForSupervisor) {
+      const [ops] = await db.query(
+        `SELECT full_name, email FROM do_operators
+         WHERE LOWER(TRIM(warehouse_name)) = LOWER(TRIM(?))
+         ORDER BY id ASC LIMIT 1`,
+        [whForSupervisor]
+      );
+      if (ops.length) {
+        supervisor_name = ops[0].full_name || null;
+        supervisor_email = ops[0].email || null;
+      }
+    }
+
+    const byDate = {};
+    const ensureDay = (ymd) => {
+      if (!byDate[ymd]) {
+        byDate[ymd] = {
+          date: ymd,
+          morning_qty: null,
+          evening_qty: null,
+          morning_temp: null,
+          evening_temp: null,
+          inward_boxes: 0,
+          outward_boxes: 0,
+          total_boxes: null
+        };
+      }
+      return byDate[ymd];
+    };
+
+    // Fill every calendar day in range (Excel feel — empty days still listed)
+    {
+      const cursor = new Date(`${fromDate}T00:00:00`);
+      const end = new Date(`${toDate}T00:00:00`);
+      while (cursor <= end) {
+        ensureDay(toYmd(cursor));
+        cursor.setDate(cursor.getDate() + 1);
+      }
+    }
+
+    (chamberRows || []).forEach((row) => {
+      const ymd = row.entry_date;
+      if (!ymd) return;
+      const day = ensureDay(ymd);
+      const shift = normalizeShift(row);
+      const qty =
+        row.box_count === null || row.box_count === undefined || row.box_count === ''
+          ? null
+          : Math.max(0, Number(row.box_count) || 0);
+      const temp =
+        row.box_temp === null || row.box_temp === undefined || row.box_temp === ''
+          ? null
+          : Number.isFinite(Number(row.box_temp))
+            ? Number(row.box_temp)
+            : null;
+      if (shift === 'Evening') {
+        day.evening_qty = qty;
+        day.evening_temp = temp;
+      } else {
+        day.morning_qty = qty;
+        day.morning_temp = temp;
+      }
+    });
+
+    (inwardRows || []).forEach((row) => {
+      if (!row.entry_date) return;
+      const day = ensureDay(row.entry_date);
+      day.inward_boxes = Math.max(0, Number(row.boxes) || 0);
+    });
+    (outwardRows || []).forEach((row) => {
+      if (!row.entry_date) return;
+      const day = ensureDay(row.entry_date);
+      day.outward_boxes = Math.max(0, Number(row.boxes) || 0);
+    });
+
+    // Closing total = evening if present, else morning
+    Object.values(byDate).forEach((day) => {
+      if (day.evening_qty != null) day.total_boxes = day.evening_qty;
+      else if (day.morning_qty != null) day.total_boxes = day.morning_qty;
+      else day.total_boxes = null;
+    });
+
+    const days = Object.keys(byDate)
+      .sort((a, b) => a.localeCompare(b))
+      .map((k) => byDate[k]);
+
+    const resolvedChamber =
+      chamberName && chamberName !== '-'
+        ? chamberName
+        : String(chamberRows[0]?.chamber_name || '').trim() || null;
+    const resolvedWarehouse =
+      warehouseName || String(chamberRows[0]?.warehouse_name || '').trim() || null;
+
+    const totals = days.reduce(
+      (acc, d) => {
+        acc.inward += Number(d.inward_boxes) || 0;
+        acc.outward += Number(d.outward_boxes) || 0;
+        return acc;
+      },
+      { inward: 0, outward: 0 }
+    );
+    const lastWithTotal = [...days].reverse().find((d) => d.total_boxes != null);
+
+    return res.status(200).json({
+      success: true,
+      meta: {
+        client_name: clientName,
+        warehouse_name: resolvedWarehouse,
+        chamber_name: resolvedChamber,
+        supervisor_name,
+        supervisor_email,
+        fromDate,
+        toDate,
+        day_count: days.length,
+        month_inward_total: totals.inward,
+        month_outward_total: totals.outward,
+        closing_total: lastWithTotal ? lastWithTotal.total_boxes : null
+      },
+      days
+    });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'getClientMonthBoxSheet',
+      req,
+      clientMessage: 'Failed to load client month box sheet.'
     });
   }
 };
