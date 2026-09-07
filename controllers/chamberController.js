@@ -1180,6 +1180,105 @@ exports.createChamber = async (req, res) => {
       });
     }
 
+    // Super Admin (or non-DO): may bind to a DO warehouse + bump that operator's chamber_limit
+    const operatorEmail = String(req.body?.operator_email || '').trim().toLowerCase() || null;
+    let warehouseName = String(req.body?.warehouse_name || '').trim() || null;
+    let appliedLimit = null;
+
+    if (operatorEmail) {
+      const [userRows] = await db.query(
+        'SELECT chamber_limit, warehouse_name FROM do_operators WHERE email = ? LIMIT 1',
+        [operatorEmail]
+      );
+      if (!userRows.length) {
+        return res.status(404).json({
+          success: false,
+          message: 'Data operator not found for chamber add.'
+        });
+      }
+      if (!warehouseName) {
+        warehouseName = String(userRows[0].warehouse_name || '').trim() || null;
+      }
+      let limit = parseInt(userRows[0].chamber_limit || 4, 10);
+      if (!Number.isFinite(limit) || limit < 1) limit = 4;
+
+      if (!name) {
+        name = `Chamber ${limit + 1}`;
+      }
+
+      let chamberId = null;
+      const [dup] = await db.query(
+        'SELECT id, name, chamber_type, warehouse_name FROM chambers WHERE name = ? LIMIT 1',
+        [name]
+      );
+      if (dup.length > 0) {
+        chamberId = dup[0].id;
+        if (warehouseName && !String(dup[0].warehouse_name || '').trim()) {
+          await db.query('UPDATE chambers SET warehouse_name = ? WHERE id = ?', [
+            warehouseName,
+            chamberId
+          ]);
+        }
+        if (chamber_type && String(dup[0].chamber_type || '') !== chamber_type) {
+          await db.query('UPDATE chambers SET chamber_type = ? WHERE id = ?', [
+            chamber_type,
+            chamberId
+          ]);
+        }
+      } else {
+        const [result] = await db.query(
+          'INSERT INTO chambers (name, chamber_type, warehouse_name) VALUES (?, ?, ?)',
+          [name, chamber_type, warehouseName]
+        );
+        chamberId = result.insertId;
+      }
+
+      const [all] = await db.query('SELECT id, name FROM chambers ORDER BY id ASC');
+      let picked = pickDoChambers(all, limit);
+      if (!picked.some((c) => Number(c.id) === Number(chamberId))) {
+        let newLimit = Math.min(50, Math.max(limit + 1, picked.length + 1));
+        while (
+          newLimit <= 50 &&
+          !pickDoChambers(all, newLimit).some((c) => Number(c.id) === Number(chamberId))
+        ) {
+          newLimit += 1;
+        }
+        await db.query('UPDATE do_operators SET chamber_limit = ? WHERE email = ?', [
+          newLimit,
+          operatorEmail
+        ]);
+        limit = newLimit;
+      }
+      appliedLimit = limit;
+
+      try {
+        const email = req.user ? req.user.email : 'system';
+        const actorLabel = req.user ? (req.user.full_name || email) : 'System';
+        await logActivity(
+          operatorEmail,
+          'ADD_CHAMBER',
+          'DO_CHANGE',
+          `${actorLabel} added chamber "${name}" (id: ${chamberId}) for ${operatorEmail}${
+            remark ? `. Remark: ${remark}` : ''
+          }. Limit now ${limit}.`,
+          chamberId,
+          remark || null
+        );
+      } catch (_) {}
+
+      return res.status(201).json({
+        success: true,
+        message: 'Chamber created successfully.',
+        data: {
+          id: chamberId,
+          name,
+          chamber_type,
+          warehouse_name: warehouseName
+        },
+        chamber_limit: appliedLimit
+      });
+    }
+
     const [existing] = await db.query('SELECT id, name, chamber_type FROM chambers ORDER BY id ASC');
     if (!name) {
       name = `Chamber ${existing.length + 1}`;
@@ -1190,7 +1289,10 @@ exports.createChamber = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Chamber name already exists.' });
     }
 
-    const [result] = await db.query('INSERT INTO chambers (name, chamber_type) VALUES (?, ?)', [name, chamber_type]);
+    const [result] = await db.query(
+      'INSERT INTO chambers (name, chamber_type, warehouse_name) VALUES (?, ?, ?)',
+      [name, chamber_type, warehouseName]
+    );
 
     try {
       const email = req.user ? req.user.email : 'system';
@@ -1208,7 +1310,7 @@ exports.createChamber = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Chamber created successfully.',
-      data: { id: result.insertId, name, chamber_type }
+      data: { id: result.insertId, name, chamber_type, warehouse_name: warehouseName }
     });
   } catch (error) {
     return handleControllerError(res, error, {

@@ -11,7 +11,10 @@
     "db:clear-keep-super-admin": "node database/clearKeepSuperAdmin.js",
     "db:migrate-sub-admins": "node database/migrate_sub_admins.js",
     "logs:archive": "node scripts/archive-error-logs.js",
-    "db:backup": "node scripts/backup-db.js"
+    "db:backup": "node scripts/backup-db.js",
+    "db:restore": "node scripts/restore-db.js",
+    "db:verify": "node scripts/verify-schema.js && node scripts/smoke-test-api.js",
+    "db:unlock-login": "node scripts/unlock-login.js"
   },
   "keywords": [
     "crm",

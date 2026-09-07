@@ -19,6 +19,14 @@ const dbHostHint = String(
 ).toLowerCase();
 const isFreeSqlHost =
   dbHostHint.includes('freesqldatabase') || dbHostHint.includes('sql12.freesqldatabase');
+const isRailwayInternalHost = dbHostHint.includes('.railway.internal');
+
+if (isRailwayInternalHost) {
+  console.warn(
+    '⚠️ DB_HOST is mysql.railway.internal — this only works when the backend runs INSIDE Railway. ' +
+      'For local npm start, use Railway Public Networking host (*.proxy.rlwy.net) + public port, or localhost.'
+  );
+}
 
 const poolOptions = {
   waitForConnections: true,

@@ -111,9 +111,11 @@ app.use((req, res, next) => {
 });
 
 // Rate Limiter for Login Endpoint (Brute-force protection)
+// Skipped on local dev so wrong-password testing does not block you for 15 minutes.
 const loginRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 15,
+  skip: () => process.env.NODE_ENV !== 'production',
   message: {
     success: false,
     message: 'Too many login attempts from this IP. Please try again after 15 minutes.'
