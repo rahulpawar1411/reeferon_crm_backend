@@ -65,6 +65,15 @@ exports.getInwardLogs = async (req, res) => {
       params.push(toDate);
     }
 
+    const missingPodRaw = String(req.query.missingPod || req.query.podMissing || '')
+      .trim()
+      .toLowerCase();
+    if (missingPodRaw === '1' || missingPodRaw === 'true' || missingPodRaw === 'yes') {
+      conditions.push(
+        `(inward_pod_photo IS NULL OR TRIM(inward_pod_photo) = '' OR LOWER(TRIM(inward_pod_photo)) = 'null' OR LOWER(TRIM(inward_pod_photo)) = 'undefined')`
+      );
+    }
+
     appendWarehouseFilter(conditions, params, req.query, req.user);
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
