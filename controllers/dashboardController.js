@@ -1150,8 +1150,7 @@ exports.getDoTaskOverview = async (req, res) => {
     // Prefer India local "today" (pool timezone is +05:30; Date here is server local)
     const now = new Date();
     const todayStr = toYmd(now);
-    const hour = now.getHours();
-    const expectedShifts = hour >= 16 ? ['Morning', 'Evening'] : ['Morning'];
+    const expectedShifts = ['Morning', 'Evening'];
 
     const pastDates = [];
     for (let i = 1; i <= 5; i += 1) {
@@ -1173,6 +1172,8 @@ exports.getDoTaskOverview = async (req, res) => {
           a.chamber_id,
           a.client_name,
           NULLIF(TRIM(a.warehouse_name), '') AS assignment_warehouse,
+          NULLIF(TRIM(a.warehouse_code), '') AS assignment_warehouse_code,
+          NULLIF(TRIM(c.warehouse_name), '') AS chamber_warehouse,
           c.name AS chamber_name
         FROM chamber_client_assignments a
         LEFT JOIN chambers c ON c.id = a.chamber_id
@@ -1211,7 +1212,8 @@ exports.getDoTaskOverview = async (req, res) => {
          chamber_id,
          warehouse_name,
          shift,
-         inspection_time
+         inspection_time,
+         operator_email
        FROM daily_chamber_temp_logs
        WHERE entry_date IN (?)`,
       [dateList]
@@ -1233,33 +1235,84 @@ exports.getDoTaskOverview = async (req, res) => {
       return s || 'Unassigned';
     };
 
+    const keySet = (...vals) => {
+      const out = new Set();
+      vals.forEach((v) => {
+        const s = String(v || '').trim().toLowerCase();
+        if (s) out.add(s);
+      });
+      return out;
+    };
+
+    const setsOverlap = (a, b) => {
+      for (const k of a) {
+        if (b.has(k)) return true;
+      }
+      return false;
+    };
+
+    const chamberNumber = (name) => {
+      const m = String(name || '').match(/^Chamber\s+(\d+)$/i);
+      return m ? parseInt(m[1], 10) : null;
+    };
+
     const logKey = (date, chamber, client, shift) =>
       `${date}|${String(chamber || '').trim().toLowerCase()}|${String(client || '').trim().toLowerCase()}|${shift}`;
+
+    const logIdKey = (date, chamberId, client, shift) =>
+      `${date}|id:${chamberId}|${String(client || '').trim().toLowerCase()}|${shift}`;
 
     const dayClientKey = (date, chamber, client) =>
       `${date}|${String(chamber || '').trim().toLowerCase()}|${String(client || '').trim().toLowerCase()}`;
 
     const todayLogSet = new Set();
     const pastLogSet = new Set();
+    const submittedByEmail = new Map();
     (logs || []).forEach((row) => {
       const date = String(row.entry_date || '').slice(0, 10);
       if (!date) return;
       const chamber = row.chamber_name;
       const client = row.client_name;
+      const shift = normalizeShift(row);
       if (date === todayStr) {
-        todayLogSet.add(logKey(date, chamber, client, normalizeShift(row)));
+        todayLogSet.add(logKey(date, chamber, client, shift));
+        if (row.chamber_id != null) {
+          todayLogSet.add(logIdKey(date, row.chamber_id, client, shift));
+        }
+        const email = String(row.operator_email || '').trim().toLowerCase();
+        if (email) {
+          submittedByEmail.set(email, (submittedByEmail.get(email) || 0) + 1);
+        }
       } else {
         pastLogSet.add(dayClientKey(date, chamber, client));
+        if (row.chamber_id != null) {
+          pastLogSet.add(`${date}|id:${row.chamber_id}|${String(client || '').trim().toLowerCase()}`);
+        }
       }
     });
 
+    const assignmentIsDone = (a, shift) =>
+      todayLogSet.has(logKey(todayStr, a.chamber_name, a.client_name, shift))
+      || (a.chamber_id != null && todayLogSet.has(logIdKey(todayStr, a.chamber_id, a.client_name, shift)));
+
+    const assignmentIsOverdue = (a, date) => {
+      const byName = pastLogSet.has(dayClientKey(date, a.chamber_name, a.client_name));
+      const byId =
+        a.chamber_id != null
+        && pastLogSet.has(`${date}|id:${a.chamber_id}|${String(a.client_name || '').trim().toLowerCase()}`);
+      return !(byName || byId);
+    };
+
     const buckets = new Map();
 
-    const ensureBucket = (warehouse) => {
+    const ensureBucket = (warehouse, extra = {}) => {
       const key = normalizeWh(warehouse).toLowerCase();
       if (!buckets.has(key)) {
         buckets.set(key, {
           warehouse_name: normalizeWh(warehouse),
+          warehouse_keys: keySet(warehouse, extra.warehouse_code),
+          chamber_limit: Number(extra.chamber_limit) || 4,
+          seenAssignments: new Set(),
           operators: [],
           clients: [],
           assignment_count: 0,
@@ -1267,15 +1320,59 @@ exports.getDoTaskOverview = async (req, res) => {
           pending: 0,
           overdue: 0,
           expected_today: 0,
+          morning_expected: 0,
+          morning_completed: 0,
           morning_pending: 0,
+          evening_expected: 0,
+          evening_completed: 0,
           evening_pending: 0
         });
       }
-      return buckets.get(key);
+      const bucket = buckets.get(key);
+      keySet(warehouse, extra.warehouse_code).forEach((k) => bucket.warehouse_keys.add(k));
+      const limit = Number(extra.chamber_limit);
+      if (Number.isFinite(limit) && limit > bucket.chamber_limit) bucket.chamber_limit = limit;
+      return bucket;
+    };
+
+    const addAssignmentToBucket = (bucket, a) => {
+      const num = chamberNumber(a.chamber_name);
+      if (num != null && num > (Number(bucket.chamber_limit) || 4)) return;
+      const client = String(a.client_name || '').trim();
+      if (!client) return;
+      const dedupeKey = `${num ?? a.chamber_id ?? ''}|${client.toLowerCase()}`;
+      if (bucket.seenAssignments.has(dedupeKey)) return;
+      bucket.seenAssignments.add(dedupeKey);
+      bucket.assignment_count += 1;
+      bucket.clients.push({
+        client_name: client,
+        chamber_name: a.chamber_name || null,
+        chamber_id: a.chamber_id != null ? a.chamber_id : null
+      });
+
+      expectedShifts.forEach((shift) => {
+        bucket.expected_today += 1;
+        const prefix = shift === 'Evening' ? 'evening' : 'morning';
+        bucket[`${prefix}_expected`] += 1;
+        if (assignmentIsDone(a, shift)) {
+          bucket.completed += 1;
+          bucket[`${prefix}_completed`] += 1;
+        } else {
+          bucket.pending += 1;
+          bucket[`${prefix}_pending`] += 1;
+        }
+      });
+
+      pastDates.forEach((date) => {
+        if (assignmentIsOverdue(a, date)) bucket.overdue += 1;
+      });
     };
 
     (operators || []).forEach((op) => {
-      const bucket = ensureBucket(op.warehouse_name);
+      const bucket = ensureBucket(op.warehouse_name || op.warehouse_code, {
+        warehouse_code: op.warehouse_code,
+        chamber_limit: op.chamber_limit
+      });
       bucket.operators.push({
         id: op.id,
         name: op.full_name || op.email?.split('@')[0] || 'DO',
@@ -1288,47 +1385,42 @@ exports.getDoTaskOverview = async (req, res) => {
     });
 
     (assignments || []).forEach((a) => {
-      const warehouse = a.assignment_warehouse || 'Unassigned';
-      const bucket = ensureBucket(warehouse);
-      bucket.assignment_count += 1;
-      bucket.clients.push({
-        client_name: String(a.client_name || '').trim(),
-        chamber_name: a.chamber_name || null,
-        chamber_id: a.chamber_id != null ? a.chamber_id : null
+      const aKeys = keySet(
+        a.assignment_warehouse,
+        a.assignment_warehouse_code,
+        a.chamber_warehouse
+      );
+      let matched = false;
+      buckets.forEach((bucket) => {
+        if (aKeys.size === 0) return;
+        if (setsOverlap(aKeys, bucket.warehouse_keys)) {
+          addAssignmentToBucket(bucket, a);
+          matched = true;
+        }
       });
-
-      expectedShifts.forEach((shift) => {
-        bucket.expected_today += 1;
-        const done = todayLogSet.has(
-          logKey(todayStr, a.chamber_name, a.client_name, shift)
+      if (!matched) {
+        const fallback = a.assignment_warehouse || a.chamber_warehouse || a.assignment_warehouse_code || 'Unassigned';
+        addAssignmentToBucket(
+          ensureBucket(fallback, { warehouse_code: a.assignment_warehouse_code }),
+          a
         );
-        if (done) {
-          bucket.completed += 1;
-        } else {
-          bucket.pending += 1;
-          if (shift === 'Morning') bucket.morning_pending += 1;
-          if (shift === 'Evening') bucket.evening_pending += 1;
-        }
-      });
-
-      pastDates.forEach((date) => {
-        if (!pastLogSet.has(dayClientKey(date, a.chamber_name, a.client_name))) {
-          bucket.overdue += 1;
-        }
-      });
+      }
     });
 
     const warehouses = Array.from(buckets.values())
-      .map((w) => ({
-        ...w,
-        do_names: w.operators.map((o) => o.name).join(', ') || 'No DO assigned',
-        status:
-          w.pending === 0 && w.overdue === 0
-            ? 'On track'
-            : w.overdue > 0
-              ? 'Needs attention'
-              : 'In progress'
-      }))
+      .map((w) => {
+        const { seenAssignments, warehouse_keys, chamber_limit, ...rest } = w;
+        return {
+          ...rest,
+          do_names: w.operators.map((o) => o.name).join(', ') || 'No DO assigned',
+          status:
+            w.pending === 0 && w.overdue === 0
+              ? 'On track'
+              : w.overdue > 0
+                ? 'Needs attention'
+                : 'In progress'
+        };
+      })
       .sort((a, b) => a.warehouse_name.localeCompare(b.warehouse_name));
 
     const flatOperators = [];
@@ -1354,12 +1446,23 @@ exports.getDoTaskOverview = async (req, res) => {
 
     warehouses.forEach((w) => {
       (w.operators || []).forEach((op) => {
+        const emailKey = String(op.email || '').trim().toLowerCase();
         flatOperators.push({
           ...op,
           warehouse_name: w.warehouse_name,
           completed: w.completed,
           pending: w.pending,
-          overdue: w.overdue
+          overdue: w.overdue,
+          expected_today: w.expected_today,
+          morning_expected: w.morning_expected,
+          morning_completed: w.morning_completed,
+          morning_pending: w.morning_pending,
+          evening_expected: w.evening_expected,
+          evening_completed: w.evening_completed,
+          evening_pending: w.evening_pending,
+          assignment_count: w.assignment_count,
+          submitted_today: submittedByEmail.get(emailKey) || 0,
+          status: w.status
         });
       });
       (w.clients || []).forEach((c) => {
@@ -1412,6 +1515,12 @@ exports.getDoTaskOverview = async (req, res) => {
         acc.completed += w.completed;
         acc.pending += w.pending;
         acc.overdue += w.overdue;
+        acc.morning_completed += Number(w.morning_completed) || 0;
+        acc.morning_pending += Number(w.morning_pending) || 0;
+        acc.morning_expected += Number(w.morning_expected) || 0;
+        acc.evening_completed += Number(w.evening_completed) || 0;
+        acc.evening_pending += Number(w.evening_pending) || 0;
+        acc.evening_expected += Number(w.evening_expected) || 0;
         return acc;
       },
       {
@@ -1421,7 +1530,13 @@ exports.getDoTaskOverview = async (req, res) => {
         customers: portalCustomerCount,
         completed: 0,
         pending: 0,
-        overdue: 0
+        overdue: 0,
+        morning_completed: 0,
+        morning_pending: 0,
+        morning_expected: 0,
+        evening_completed: 0,
+        evening_pending: 0,
+        evening_expected: 0
       }
     );
 
