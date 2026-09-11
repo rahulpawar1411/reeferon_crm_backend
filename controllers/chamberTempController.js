@@ -124,6 +124,32 @@ exports.getChamberLogs = async (req, res) => {
     });
     appendChamberFilter(conditions, params, req.query);
 
+    const shiftFilter = String(req.query.shift || '').trim().toLowerCase();
+    if (shiftFilter === 'morning') {
+      conditions.push(`(
+        LOWER(TRIM(IFNULL(shift, ''))) = 'morning'
+        OR (
+          (shift IS NULL OR TRIM(shift) = '')
+          AND NOT (
+            inspection_time LIKE '16:%'
+            OR inspection_time LIKE '18:%'
+            OR UPPER(IFNULL(inspection_time, '')) LIKE '%04:00 PM%'
+            OR UPPER(IFNULL(inspection_time, '')) LIKE '%4:00 PM%'
+            OR UPPER(IFNULL(inspection_time, '')) LIKE '%06:00 PM%'
+          )
+        )
+      )`);
+    } else if (shiftFilter === 'evening') {
+      conditions.push(`(
+        LOWER(TRIM(IFNULL(shift, ''))) = 'evening'
+        OR inspection_time LIKE '16:%'
+        OR inspection_time LIKE '18:%'
+        OR UPPER(IFNULL(inspection_time, '')) LIKE '%04:00 PM%'
+        OR UPPER(IFNULL(inspection_time, '')) LIKE '%4:00 PM%'
+        OR UPPER(IFNULL(inspection_time, '')) LIKE '%06:00 PM%'
+      )`);
+    }
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
     const [countRows] = await db.query(
