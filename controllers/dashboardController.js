@@ -1147,14 +1147,46 @@ exports.getDoTaskOverview = async (req, res) => {
     const toYmd = (d) =>
       `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
-    // Prefer India local "today" (pool timezone is +05:30; Date here is server local)
+    // Prefer India local "today" (pool timezone is +05:30; Date here is server local).
+    // Optional ?date= or ?fromDate=YYYY-MM-DD (+ optional ?toDate=) for Mor/Evn totals.
+    // Single day: overdue = prior 5 days. Range: sum Mor/Evn across each day in range.
     const now = new Date();
-    const todayStr = toYmd(now);
+    const requestedFrom = String(req.query.fromDate || req.query.date || '')
+      .trim()
+      .slice(0, 10);
+    const requestedTo = String(req.query.toDate || '')
+      .trim()
+      .slice(0, 10);
+    const validYmd = (s) =>
+      /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(`${s}T12:00:00`).getTime());
+    let fromStr = validYmd(requestedFrom) ? requestedFrom : toYmd(now);
+    let toStr = validYmd(requestedTo) ? requestedTo : fromStr;
+    if (fromStr > toStr) {
+      const tmp = fromStr;
+      fromStr = toStr;
+      toStr = tmp;
+    }
+    // Cap range length to keep queries bounded
+    const rangeDates = [];
+    {
+      const cursor = new Date(`${fromStr}T12:00:00`);
+      const end = new Date(`${toStr}T12:00:00`);
+      let guard = 0;
+      while (cursor <= end && guard < 62) {
+        rangeDates.push(toYmd(cursor));
+        cursor.setDate(cursor.getDate() + 1);
+        guard += 1;
+      }
+    }
+    if (!rangeDates.length) rangeDates.push(toYmd(now));
+    const todayStr = rangeDates[rangeDates.length - 1]; // end day (overdue anchor)
+    const useRange = rangeDates.length > 1;
+    const baseDate = new Date(`${todayStr}T12:00:00`);
     const expectedShifts = ['Morning', 'Evening'];
 
     const pastDates = [];
     for (let i = 1; i <= 5; i += 1) {
-      const d = new Date(now);
+      const d = new Date(baseDate);
       d.setDate(d.getDate() - i);
       pastDates.push(toYmd(d));
     }
@@ -1203,7 +1235,7 @@ exports.getDoTaskOverview = async (req, res) => {
       console.warn('DO task overview client_master skipped:', masterErr.message);
     }
 
-    const dateList = [todayStr, ...pastDates];
+    const dateList = [...new Set([...rangeDates, ...pastDates])];
     const [logs] = await db.query(
       `SELECT
          DATE_FORMAT(entry_date, '%Y-%m-%d') AS entry_date,
@@ -1265,19 +1297,20 @@ exports.getDoTaskOverview = async (req, res) => {
     const dayClientKey = (date, chamber, client) =>
       `${date}|${String(chamber || '').trim().toLowerCase()}|${String(client || '').trim().toLowerCase()}`;
 
-    const todayLogSet = new Set();
+    const rangeLogSet = new Set();
     const pastLogSet = new Set();
     const submittedByEmail = new Map();
+    const rangeDateSet = new Set(rangeDates);
     (logs || []).forEach((row) => {
       const date = String(row.entry_date || '').slice(0, 10);
       if (!date) return;
       const chamber = row.chamber_name;
       const client = row.client_name;
       const shift = normalizeShift(row);
-      if (date === todayStr) {
-        todayLogSet.add(logKey(date, chamber, client, shift));
+      if (rangeDateSet.has(date)) {
+        rangeLogSet.add(logKey(date, chamber, client, shift));
         if (row.chamber_id != null) {
-          todayLogSet.add(logIdKey(date, row.chamber_id, client, shift));
+          rangeLogSet.add(logIdKey(date, row.chamber_id, client, shift));
         }
         const email = String(row.operator_email || '').trim().toLowerCase();
         if (email) {
@@ -1291,9 +1324,9 @@ exports.getDoTaskOverview = async (req, res) => {
       }
     });
 
-    const assignmentIsDone = (a, shift) =>
-      todayLogSet.has(logKey(todayStr, a.chamber_name, a.client_name, shift))
-      || (a.chamber_id != null && todayLogSet.has(logIdKey(todayStr, a.chamber_id, a.client_name, shift)));
+    const assignmentIsDone = (a, day, shift) =>
+      rangeLogSet.has(logKey(day, a.chamber_name, a.client_name, shift))
+      || (a.chamber_id != null && rangeLogSet.has(logIdKey(day, a.chamber_id, a.client_name, shift)));
 
     const assignmentIsOverdue = (a, date) => {
       const byName = pastLogSet.has(dayClientKey(date, a.chamber_name, a.client_name));
@@ -1351,21 +1384,26 @@ exports.getDoTaskOverview = async (req, res) => {
       });
 
       expectedShifts.forEach((shift) => {
-        bucket.expected_today += 1;
-        const prefix = shift === 'Evening' ? 'evening' : 'morning';
-        bucket[`${prefix}_expected`] += 1;
-        if (assignmentIsDone(a, shift)) {
-          bucket.completed += 1;
-          bucket[`${prefix}_completed`] += 1;
-        } else {
-          bucket.pending += 1;
-          bucket[`${prefix}_pending`] += 1;
-        }
+        rangeDates.forEach((day) => {
+          bucket.expected_today += 1;
+          const prefix = shift === 'Evening' ? 'evening' : 'morning';
+          bucket[`${prefix}_expected`] += 1;
+          if (assignmentIsDone(a, day, shift)) {
+            bucket.completed += 1;
+            bucket[`${prefix}_completed`] += 1;
+          } else {
+            bucket.pending += 1;
+            bucket[`${prefix}_pending`] += 1;
+          }
+        });
       });
 
-      pastDates.forEach((date) => {
-        if (assignmentIsOverdue(a, date)) bucket.overdue += 1;
-      });
+      // Overdue stays single-day style (prior 5 days before range end)
+      if (!useRange) {
+        pastDates.forEach((date) => {
+          if (assignmentIsOverdue(a, date)) bucket.overdue += 1;
+        });
+      }
     };
 
     (operators || []).forEach((op) => {
@@ -1542,7 +1580,10 @@ exports.getDoTaskOverview = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      today: todayStr,
+      today: fromStr,
+      fromDate: fromStr,
+      toDate: toStr,
+      range_days: rangeDates.length,
       expected_shifts: expectedShifts,
       summary,
       warehouses,
