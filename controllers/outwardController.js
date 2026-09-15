@@ -161,30 +161,52 @@ exports.addOutwardLog = async (req, res) => {
     );
 
     let startWithDate = data.outward_loading_start_time || null;
-    if (data.outward_entry_date && data.outward_loading_start_time) {
-      const dateParts = data.outward_entry_date.split('-');
+    const startTimeOnly = (() => {
+      const raw = String(data.outward_loading_start_time || '').trim();
+      if (!raw) return '';
+      return raw.includes(' ') ? raw.split(/\s+/).pop() : raw;
+    })();
+    const endTimeOnly = (() => {
+      const raw = String(data.outward_loading_end_time || '').trim();
+      if (!raw) return '';
+      return raw.includes(' ') ? raw.split(/\s+/).pop() : raw;
+    })();
+
+    if (data.outward_entry_date && startTimeOnly) {
+      const dateParts = String(data.outward_entry_date).split('-');
       if (dateParts.length === 3) {
         const [yyyy, mm, dd] = dateParts;
-        if (!data.outward_loading_start_time.includes('-')) {
-          startWithDate = `${dd}-${mm}-${yyyy} ${data.outward_loading_start_time}`;
+        // Already a dated string (e.g. DD-MM-YYYY HH:mm) — keep it
+        if (String(data.outward_loading_start_time || '').includes('-') && String(data.outward_loading_start_time || '').includes(' ')) {
+          startWithDate = data.outward_loading_start_time;
+        } else {
+          startWithDate = `${dd}-${mm}-${yyyy} ${startTimeOnly}`;
         }
       }
     }
 
     let endWithDate = data.outward_loading_end_time || null;
-    if (data.outward_entry_date && data.outward_loading_end_time) {
-      const dateParts = data.outward_entry_date.split('-');
+    if (data.outward_entry_date && endTimeOnly) {
+      const dateParts = String(data.outward_entry_date).split('-');
       if (dateParts.length === 3) {
         const [yyyy, mm, dd] = dateParts;
-        if (!data.outward_loading_end_time.includes('-')) {
-          let targetDay = parseInt(dd);
-          let targetMonth = parseInt(mm);
-          let targetYear = parseInt(yyyy);
+        if (String(data.outward_loading_end_time || '').includes('-') && String(data.outward_loading_end_time || '').includes(' ')) {
+          endWithDate = data.outward_loading_end_time;
+        } else {
+          let targetDay = parseInt(dd, 10);
+          let targetMonth = parseInt(mm, 10);
+          let targetYear = parseInt(yyyy, 10);
 
-          if (data.outward_loading_start_time) {
-            const [startH, startM] = data.outward_loading_start_time.split(':').map(Number);
-            const [endH, endM] = data.outward_loading_end_time.split(':').map(Number);
-            if ((endH * 60 + endM) < (startH * 60 + startM)) {
+          if (startTimeOnly) {
+            const [startH, startM] = startTimeOnly.split(':').map(Number);
+            const [endH, endM] = endTimeOnly.split(':').map(Number);
+            if (
+              Number.isFinite(startH) &&
+              Number.isFinite(startM) &&
+              Number.isFinite(endH) &&
+              Number.isFinite(endM) &&
+              endH * 60 + endM < startH * 60 + startM
+            ) {
               const dt = new Date(targetYear, targetMonth - 1, targetDay + 1);
               targetDay = dt.getDate();
               targetMonth = dt.getMonth() + 1;
@@ -194,7 +216,7 @@ exports.addOutwardLog = async (req, res) => {
 
           const ddStr = String(targetDay).padStart(2, '0');
           const mmStr = String(targetMonth).padStart(2, '0');
-          endWithDate = `${ddStr}-${mmStr}-${targetYear} ${data.outward_loading_end_time}`;
+          endWithDate = `${ddStr}-${mmStr}-${targetYear} ${endTimeOnly}`;
         }
       }
     }
@@ -213,7 +235,7 @@ exports.addOutwardLog = async (req, res) => {
         outward_invoice_photos, outward_pod_photo, outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_pre_vehicle_temp_photo, 
         outward_material_temp_photo, outward_vehicle_back_side_photo, outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo,
         outward_created_at, outward_updated_at, warehouse_name, warehouse_code, outward_client_code, operator_email, photo_capture_metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const values = [
