@@ -67,6 +67,20 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(cookieParser());
 
+// Liveness only — no DB. Railway uses this so a slow MySQL cannot 502 the app.
+app.get('/api/health', (_req, res) => {
+  return res.status(200).json({
+    success: true,
+    message: 'ReeferON CRM API running smoothly.',
+    data: {
+      status: 'Online',
+      uptimeSeconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString(),
+      version: process.env.npm_package_version || '1.0.0'
+    }
+  });
+});
+
 // Compact HTTP status log (4xx/5xx always; all statuses if LOG_ALL_STATUS=1)
 app.use((req, res, next) => {
   res.on('finish', () => {
@@ -322,24 +336,29 @@ app.use(
   require('./routes/customerAdminNotesRoutes')
 );
 
-app.get('/api/health', async (req, res) => {
-  const db = require('./config/db');
-  const dbHealth = await db.getDbHealth();
-  const ok = dbHealth.connected;
-  const uptimeSeconds = Math.floor(process.uptime());
-
-  return res.status(ok ? 200 : 503).json({
-    success: ok,
-    message: ok ? 'ReeferON CRM API running smoothly.' : 'API up but database unavailable.',
-    data: {
-      status: ok ? 'Online' : 'Degraded',
-      database: ok ? 'connected' : 'disconnected',
-      databaseError: dbHealth.error || null,
-      uptimeSeconds,
-      timestamp: new Date().toISOString(),
-      version: process.env.npm_package_version || '1.0.0'
-    }
-  });
+app.get('/api/health/db', async (_req, res) => {
+  try {
+    const db = require('./config/db');
+    const dbHealth = await db.getDbHealth();
+    const ok = Boolean(dbHealth.connected);
+    return res.status(200).json({
+      success: ok,
+      message: ok ? 'Database connected.' : 'Database unavailable.',
+      data: {
+        database: ok ? 'connected' : 'disconnected',
+        databaseError: dbHealth.error || null
+      }
+    });
+  } catch (err) {
+    return res.status(200).json({
+      success: false,
+      message: 'Database unavailable.',
+      data: {
+        database: 'disconnected',
+        databaseError: err.message || String(err)
+      }
+    });
+  }
 });
 
 app.use((req, res) => {
