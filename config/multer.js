@@ -2,8 +2,11 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const { getUploadFolderPath, ensureUploadFolders, toDbRelPath } = require('../utils/uploadsDir');
 
-// Configure Cloudinary
+ensureUploadFolders();
+
+// Configure Cloudinary (optional — only used when UPLOAD_TO_CLOUDINARY=true)
 if (process.env.CLOUDINARY_CLOUD_NAME) {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -36,11 +39,11 @@ const uploadBuffer = (buffer, folder, publicId) => {
 };
 
 /**
- * Upload middleware — Cloudinary OR local disk (env switch).
+ * Upload middleware — local disk is the default (Railway / self-host).
  *
- * UPLOAD_TO_CLOUDINARY=true  → local disk + Cloudinary; DB gets Cloudinary URL (current DEV).
- * UPLOAD_TO_CLOUDINARY=false → local disk only under uploads/; DB gets /uploads/... path
- *   → planned for PRODUCTION deploy (no Cloudinary). Flip the .env flag at deploy time.
+ * UPLOAD_TO_CLOUDINARY=true  → also push to Cloudinary; DB may get CDN URL.
+ * UPLOAD_TO_CLOUDINARY=false → disk only under uploads/crm/<folder>/ (same names as Cloudinary).
+ * Existing Cloudinary URLs in MySQL stay unchanged and map to those files.
  */
 const createUploader = (folderName, filePrefix) => {
   const uploadToCloudinary = process.env.UPLOAD_TO_CLOUDINARY === 'true';
@@ -64,14 +67,14 @@ const createUploader = (folderName, filePrefix) => {
               const publicId = filename;
 
               // 1. Double Save: Write buffer to local disk folder
-              const uploadDir = path.join(__dirname, '../uploads', folderName);
+              const uploadDir = getUploadFolderPath(folderName);
               if (!fs.existsSync(uploadDir)) {
                 fs.mkdirSync(uploadDir, { recursive: true });
               }
               const localFilePath = path.join(uploadDir, `${filename}${ext}`);
               fs.writeFileSync(localFilePath, req.file.buffer);
               console.log(`💾 Local Backup Saved: ${localFilePath}`);
-              req.file.localRelPath = `uploads/${folderName}/${filename}${ext}`;
+              req.file.localRelPath = toDbRelPath(folderName, `${filename}${ext}`);
               req.file.filename = `${filename}${ext}`;
 
               // 2. Upload to Cloudinary CDN
@@ -96,7 +99,7 @@ const createUploader = (folderName, filePrefix) => {
 
             try {
               const uploadPromises = [];
-              const uploadDir = path.join(__dirname, '../uploads', folderName);
+              const uploadDir = getUploadFolderPath(folderName);
               if (!fs.existsSync(uploadDir)) {
                 fs.mkdirSync(uploadDir, { recursive: true });
               }
@@ -114,7 +117,7 @@ const createUploader = (folderName, filePrefix) => {
                   const localFilePath = path.join(uploadDir, `${filename}${ext}`);
                   fs.writeFileSync(localFilePath, file.buffer);
                   console.log(`💾 Local Backup Saved (Field): ${localFilePath}`);
-                  file.localRelPath = `uploads/${folderName}/${filename}${ext}`;
+                  file.localRelPath = toDbRelPath(folderName, `${filename}${ext}`);
                   file.filename = `${filename}${ext}`;
                   
                   // 2. Upload to Cloudinary CDN
@@ -136,8 +139,8 @@ const createUploader = (folderName, filePrefix) => {
       }
     };
   } else {
-    // Disk Storage Fallback Mode (For self-hosting on Hostinger)
-    const uploadDir = path.join(__dirname, '../uploads', folderName);
+    // Disk only — Cloudinary layout: uploads/crm/<folder>/<public_id>.jpg
+    const uploadDir = getUploadFolderPath(folderName);
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
@@ -176,7 +179,7 @@ const getSavedFilePath = (file, folderName) => {
     if (name.includes('/') || name.startsWith('http')) {
       /* fall through */
     } else {
-      return `uploads/${folderName}/${name}`;
+      return toDbRelPath(folderName, name);
     }
   }
   if (file.path && /^https?:\/\//i.test(file.path)) {
@@ -186,11 +189,11 @@ const getSavedFilePath = (file, folderName) => {
     const normalized = String(file.path).replace(/\\/g, '/');
     const idx = normalized.lastIndexOf('/uploads/');
     if (idx >= 0) return normalized.slice(idx + 1);
-    if (normalized.includes(`uploads/${folderName}/`)) {
+    if (normalized.includes(`uploads/crm/${folderName}/`) || normalized.includes(`uploads/${folderName}/`)) {
       return normalized.slice(normalized.indexOf('uploads/'));
     }
   }
-  return file.filename ? `uploads/${folderName}/${file.filename}` : null;
+  return file.filename ? toDbRelPath(folderName, file.filename) : null;
 };
 
 module.exports = {

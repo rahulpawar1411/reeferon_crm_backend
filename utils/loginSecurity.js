@@ -10,6 +10,11 @@ const FAIL_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_DURATION_MS = 30 * 60 * 1000; // 30 minutes
 
+/** TEMP: lock/wait off unless LOGIN_LOCKOUT=true */
+function lockoutEnabled() {
+  return String(process.env.LOGIN_LOCKOUT || '').toLowerCase() === 'true';
+}
+
 function minutesLeft(untilDate) {
   const ms = new Date(untilDate).getTime() - Date.now();
   return Math.max(1, Math.ceil(ms / 60000));
@@ -33,6 +38,7 @@ async function getRow(email) {
  * If account is locked, return lock info. Expired locks are cleared.
  */
 async function checkLoginLock(email) {
+  if (!lockoutEnabled()) return { locked: false };
   const row = await getRow(email);
   if (!row || !row.locked_until) {
     return { locked: false };
@@ -62,6 +68,9 @@ async function checkLoginLock(email) {
  * Record a failed login. Locks after 5 fails inside the 1-hour window.
  */
 async function recordFailedLogin(email, role = null) {
+  if (!lockoutEnabled()) {
+    return { failedCount: 0, locked: false, remainingAttempts: 999 };
+  }
   const now = new Date();
   const row = await getRow(email);
 

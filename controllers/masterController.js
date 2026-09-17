@@ -61,12 +61,41 @@ exports.createWarehouse = async (req, res) => {
     if (!warehouse_code || !warehouse_name) {
       return res.status(400).json({ success: false, message: 'Warehouse code and name are required.' });
     }
-    await db.query(
+    let finalCode = warehouse_code;
+    const [dup] = await db.query(
+      'SELECT warehouse_code FROM warehouse_master WHERE warehouse_code = ? LIMIT 1',
+      [finalCode]
+    );
+    if (dup.length) {
+      for (let i = 2; i <= 99; i += 1) {
+        const suffix = String(i).padStart(2, '0');
+        const candidate = `${warehouse_code}-${suffix}`.slice(0, 48);
+        const [hit] = await db.query(
+          'SELECT warehouse_code FROM warehouse_master WHERE warehouse_code = ? LIMIT 1',
+          [candidate]
+        );
+        if (!hit.length) {
+          finalCode = candidate;
+          break;
+        }
+      }
+    }
+    const [result] = await db.query(
       `INSERT INTO warehouse_master (warehouse_code, warehouse_name, city, is_active)
        VALUES (?, ?, ?, 1)`,
-      [warehouse_code, warehouse_name, city]
+      [finalCode, warehouse_name, city]
     );
-    return res.status(201).json({ success: true, message: 'Warehouse created successfully.' });
+    return res.status(201).json({
+      success: true,
+      message: 'Warehouse created successfully.',
+      data: {
+        id: result.insertId,
+        warehouse_code: finalCode,
+        warehouse_name,
+        city,
+        is_active: 1
+      }
+    });
   } catch (error) {
     if (String(error.message || '').toLowerCase().includes('duplicate')) {
       return res.status(409).json({ success: false, message: 'Warehouse code already exists.' });
@@ -104,13 +133,39 @@ exports.updateWarehouse = async (req, res) => {
     if (!sets.length) return res.status(400).json({ success: false, message: 'No fields to update.' });
     sets.push('updated_at = NOW()');
     params.push(id);
-    await db.query(`UPDATE warehouse_master SET ${sets.join(', ')} WHERE id = ?`, params);
+    const [result] = await db.query(`UPDATE warehouse_master SET ${sets.join(', ')} WHERE id = ?`, params);
+    if (!result.affectedRows) {
+      return res.status(404).json({ success: false, message: 'Warehouse not found.' });
+    }
     return res.json({ success: true, message: 'Warehouse updated successfully.' });
   } catch (error) {
     return handleControllerError(res, error, {
       checkpoint: 'masters_update_warehouse',
       req,
       clientMessage: 'Failed to update warehouse.',
+    });
+  }
+};
+
+/** DELETE /api/masters/warehouses/:id — deactivate catalog warehouse (logs stay). */
+exports.deleteWarehouse = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ success: false, message: 'Invalid warehouse id.' });
+    const [rows] = await db.query('SELECT id FROM warehouse_master WHERE id = ? LIMIT 1', [id]);
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: 'Warehouse not found.' });
+    }
+    await db.query(
+      'UPDATE warehouse_master SET is_active = 0, updated_at = NOW() WHERE id = ?',
+      [id]
+    );
+    return res.json({ success: true, message: 'Warehouse deactivated.' });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'masters_delete_warehouse',
+      req,
+      clientMessage: 'Failed to delete warehouse.',
     });
   }
 };
@@ -195,7 +250,7 @@ exports.createClient = async (req, res) => {
         }
       }
     }
-    await db.query(
+    const [result] = await db.query(
       `INSERT INTO client_master (client_code, client_name, warehouse_name, is_active)
        VALUES (?, ?, ?, 1)`,
       [finalCode, client_name, warehouse_name]
@@ -203,7 +258,14 @@ exports.createClient = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: 'Client created successfully.',
-      client_code: finalCode
+      client_code: finalCode,
+      data: {
+        id: result.insertId,
+        client_code: finalCode,
+        client_name,
+        warehouse_name,
+        is_active: 1
+      }
     });
   } catch (error) {
     if (String(error.message || '').toLowerCase().includes('duplicate')) {
@@ -249,6 +311,29 @@ exports.updateClient = async (req, res) => {
       checkpoint: 'masters_update_client',
       req,
       clientMessage: 'Failed to update client.',
+    });
+  }
+};
+
+/** DELETE /api/masters/clients/:id — deactivate catalog client (logs stay). */
+exports.deleteClient = async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (!id) return res.status(400).json({ success: false, message: 'Invalid client id.' });
+    const [rows] = await db.query('SELECT id FROM client_master WHERE id = ? LIMIT 1', [id]);
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: 'Client not found.' });
+    }
+    await db.query(
+      'UPDATE client_master SET is_active = 0, updated_at = NOW() WHERE id = ?',
+      [id]
+    );
+    return res.json({ success: true, message: 'Client deactivated.' });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'masters_delete_client',
+      req,
+      clientMessage: 'Failed to delete client.',
     });
   }
 };

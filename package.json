@@ -13,6 +13,7 @@
     "logs:archive": "node scripts/archive-error-logs.js",
     "db:backup": "node scripts/backup-db.js",
     "db:restore": "node scripts/restore-db.js",
+    "uploads:import-cloudinary": "node scripts/import-cloudinary-backup.js",
     "db:verify": "node scripts/verify-schema.js && node scripts/smoke-test-api.js",
     "db:unlock-login": "node scripts/unlock-login.js"
   },

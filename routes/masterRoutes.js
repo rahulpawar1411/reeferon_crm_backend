@@ -12,10 +12,12 @@ const masterController = require('../controllers/masterController');
 router.get('/warehouses', masterController.listWarehouses);
 router.post('/warehouses', masterController.createWarehouse);
 router.put('/warehouses/:id', masterController.updateWarehouse);
+router.delete('/warehouses/:id', masterController.deleteWarehouse);
 
 // Clients (client_master)
 router.get('/clients', masterController.listClients);
 router.post('/clients', masterController.createClient);
 router.put('/clients/:id', masterController.updateClient);
+router.delete('/clients/:id', masterController.deleteClient);
 
 module.exports = router;

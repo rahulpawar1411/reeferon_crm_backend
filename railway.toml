@@ -1,0 +1,12 @@
+# Railway: deploy this backend repo as a Web Service.
+# Add MySQL in the SAME project, then attach a Volume at /data/uploads.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "node server.js"
+healthcheckPath = "/api/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

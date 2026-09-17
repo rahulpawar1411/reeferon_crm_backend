@@ -18,6 +18,7 @@ const {
   statusLine,
   errorLine
 } = require('./utils/quietConsole');
+const { ensureUploadFolders } = require('./utils/uploadsDir');
 
 // Quiet terminal: only server running + errors + status codes
 enableQuietConsole();
@@ -28,7 +29,8 @@ const PORT = process.env.PORT || 5000;
 // Security Header Protection (Helmet)
 app.use(helmet({
   contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 
 // CORS Configuration with Credentials Support (Required for HttpOnly Cookies)
@@ -115,7 +117,10 @@ app.use((req, res, next) => {
 const loginRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 15,
-  skip: () => process.env.NODE_ENV !== 'production',
+  // TEMP: skip wait unless LOGIN_LOCKOUT=true (also skipped on local)
+  skip: () =>
+    String(process.env.LOGIN_LOCKOUT || '').toLowerCase() !== 'true' ||
+    process.env.NODE_ENV !== 'production',
   message: {
     success: false,
     message: 'Too many login attempts from this IP. Please try again after 15 minutes.'
@@ -135,8 +140,43 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-// Missing upload files must 404 (not fall through to SPA HTML — breaks <img>)
+const uploadsRoot = ensureUploadFolders();
+app.use('/uploads', express.static(uploadsRoot, {
+  fallthrough: true,
+  setHeaders(res) {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  }
+}));
+// Cloudinary URLs have no file extension; also try crm/ vs legacy folder
+app.use('/uploads', (req, res, next) => {
+  const rel = decodeURIComponent(String(req.path || '')).replace(/^\/+/, '');
+  if (!rel || rel.includes('..')) return next();
+
+  const roots = [path.join(uploadsRoot, rel)];
+  if (rel.startsWith('crm/')) {
+    roots.push(path.join(uploadsRoot, rel.slice(4)));
+  } else {
+    roots.push(path.join(uploadsRoot, 'crm', rel));
+  }
+
+  const hasExt = Boolean(path.extname(rel));
+  const extraExts = hasExt ? [] : ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+
+  for (const base of roots) {
+    const tries = [base, ...extraExts.map((ext) => `${base}${ext}`)];
+    for (const abs of tries) {
+      try {
+        if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+          return res.sendFile(abs);
+        }
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+  next();
+});
 app.use('/uploads', (req, res) => {
   res.status(404).type('text/plain').send('Upload not found');
 });
@@ -245,7 +285,7 @@ app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer'
 app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), inwardRoutes);
 app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), outwardRoutes);
 app.use('/api/do-operators', verifyToken, requireRole(['super_admin', 'sub_admin']), operatorRoutes);
-app.use('/api/customers', verifyToken, requireRole(['super_admin']), subAdminRoutes);
+app.use('/api/customers', verifyToken, requireRole(['super_admin', 'sub_admin']), subAdminRoutes);
 app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), require('./routes/appSubAdminRoutes'));
 app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), activityRoutes);
 app.use('/api/permission-requests', permissionRoutes);
@@ -265,7 +305,16 @@ app.use(
 
 app.get('/api/health', async (req, res) => {
   const db = require('./config/db');
+  const { getUploadsRoot, ensureUploadFolders } = require('./utils/uploadsDir');
   const dbHealth = await db.getDbHealth();
+  let uploadsRoot = null;
+  let uploadsOk = false;
+  try {
+    uploadsRoot = ensureUploadFolders();
+    uploadsOk = fs.existsSync(uploadsRoot);
+  } catch (_) {
+    uploadsOk = false;
+  }
   const ok = dbHealth.connected;
   const uptimeSeconds = Math.floor(process.uptime());
 
@@ -276,6 +325,9 @@ app.get('/api/health', async (req, res) => {
       status: ok ? 'Online' : 'Degraded',
       database: ok ? 'connected' : 'disconnected',
       databaseError: dbHealth.error || null,
+      uploads: uploadsOk ? 'ready' : 'missing',
+      uploadsDir: uploadsRoot || getUploadsRoot(),
+      cloudinaryUploads: process.env.UPLOAD_TO_CLOUDINARY === 'true',
       uptimeSeconds,
       timestamp: new Date().toISOString(),
       version: process.env.npm_package_version || '1.0.0'
@@ -332,7 +384,7 @@ process.on('unhandledRejection', (reason) => {
 const db = require('./config/db');
 let httpServer;
 
-httpServer = app.listen(PORT, async () => {
+httpServer = app.listen(PORT, '0.0.0.0', async () => {
   serverRunning(PORT);
   const health = await db.getDbHealth();
   if (!health.connected) {

@@ -14,6 +14,17 @@ async function queryCustomers(sql, params = []) {
   return db.query(sql, params);
 }
 
+function normalizeScopeCsv(value) {
+  if (value == null || value === '') return null;
+  const parts = Array.isArray(value)
+    ? value.map((v) => String(v || '').trim()).filter(Boolean)
+    : String(value)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+  return parts.length ? parts.join(',') : null;
+}
+
 // 1. GET ALL CUSTOMERS
 exports.getSubAdmins = async (req, res) => {
   try {
@@ -62,8 +73,8 @@ exports.createSubAdmin = async (req, res) => {
     const hashed = await bcrypt.hash(password, salt);
 
     // Store allowed_clients and allowed_warehouses as comma-separated strings
-    const clientsStr = Array.isArray(allowed_clients) ? allowed_clients.join(',') : (allowed_clients || null);
-    const warehousesStr = Array.isArray(allowed_warehouses) ? allowed_warehouses.join(',') : (allowed_warehouses || null);
+    const clientsStr = normalizeScopeCsv(allowed_clients);
+    const warehousesStr = normalizeScopeCsv(allowed_warehouses);
 
     await queryCustomers(
       'INSERT INTO customers (email, password, full_name, phone_no, allowed_clients, allowed_warehouses) VALUES (?, ?, ?, ?, ?, ?)',
@@ -142,8 +153,8 @@ exports.updateSubAdmin = async (req, res) => {
     }
 
     // Store allowed_clients and allowed_warehouses as comma-separated strings
-    const clientsStr = Array.isArray(allowed_clients) ? allowed_clients.join(',') : (allowed_clients || null);
-    const warehousesStr = Array.isArray(allowed_warehouses) ? allowed_warehouses.join(',') : (allowed_warehouses || null);
+    const clientsStr = normalizeScopeCsv(allowed_clients);
+    const warehousesStr = normalizeScopeCsv(allowed_warehouses);
 
     if (password && password.trim() !== '') {
       // Hash new password

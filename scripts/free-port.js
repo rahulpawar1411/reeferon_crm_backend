@@ -3,6 +3,12 @@
  * Usage: node scripts/free-port.js [port]
  */
 const { execSync } = require('child_process');
+
+// Railway / hosted Node — never kill the assigned PORT.
+if (process.env.RAILWAY_ENVIRONMENT || process.env.SKIP_FREE_PORT === '1') {
+  process.exit(0);
+}
+
 const port = Number(process.argv[2] || process.env.PORT || 5000);
 
 function freePortWindows(p) {
