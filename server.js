@@ -67,8 +67,7 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(cookieParser());
 
-// Liveness only — no DB. Railway uses this so a slow MySQL cannot 502 the app.
-app.get('/api/health', (_req, res) => {
+function sendLiveHealth(res) {
   return res.status(200).json({
     success: true,
     message: 'ReeferON CRM API running smoothly.',
@@ -79,6 +78,31 @@ app.get('/api/health', (_req, res) => {
       version: process.env.npm_package_version || '1.0.0'
     }
   });
+}
+
+// Liveness only — no DB. Register before listen so Railway never 502s on boot.
+app.get('/api/health', (_req, res) => sendLiveHealth(res));
+app.get('/health', (_req, res) => sendLiveHealth(res));
+app.get('/', (_req, res) => sendLiveHealth(res));
+
+let httpServer = app.listen(Number(PORT), '0.0.0.0', () => {
+  serverRunning(PORT);
+});
+
+process.on('uncaughtException', (err) => {
+  try {
+    errorLine('uncaughtException:', err?.message || err);
+  } catch (_) {
+    console.error('uncaughtException:', err?.message || err);
+  }
+});
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  try {
+    errorLine('unhandledRejection:', err?.message || err);
+  } catch (_) {
+    console.error('unhandledRejection:', err?.message || err);
+  }
 });
 
 // Compact HTTP status log (4xx/5xx always; all statuses if LOG_ALL_STATUS=1)
@@ -291,50 +315,54 @@ app.get('/api/debug-sync', async (req, res) => {
   return res.json(diagnostics);
 });
 
-const { verifyToken, requireRole } = require('./middleware/auth');
+try {
+  const { verifyToken, requireRole } = require('./middleware/auth');
 
-const authRoutes = require('./routes/authRoutes');
-const leadRoutes = require('./routes/leadRoutes');
-const dashboardRoutes = require('./routes/dashboardRoutes');
-const tempRoutes = require('./routes/tempRoutes');
-const chamberTempRoutes = require('./routes/chamberTempRoutes');
-const inwardRoutes = require('./routes/inwardRoutes');
-const outwardRoutes = require('./routes/outwardRoutes');
-const operatorRoutes = require('./routes/operatorRoutes');
-const subAdminRoutes = require('./routes/subAdminRoutes');
-const activityRoutes = require('./routes/activityRoutes');
-const permissionRoutes = require('./routes/permissionRoutes');
-const chamberRoutes = require('./routes/chamberRoutes');
-const masterRoutes = require('./routes/masterRoutes');
+  const authRoutes = require('./routes/authRoutes');
+  const leadRoutes = require('./routes/leadRoutes');
+  const dashboardRoutes = require('./routes/dashboardRoutes');
+  const tempRoutes = require('./routes/tempRoutes');
+  const chamberTempRoutes = require('./routes/chamberTempRoutes');
+  const inwardRoutes = require('./routes/inwardRoutes');
+  const outwardRoutes = require('./routes/outwardRoutes');
+  const operatorRoutes = require('./routes/operatorRoutes');
+  const subAdminRoutes = require('./routes/subAdminRoutes');
+  const activityRoutes = require('./routes/activityRoutes');
+  const permissionRoutes = require('./routes/permissionRoutes');
+  const chamberRoutes = require('./routes/chamberRoutes');
+  const masterRoutes = require('./routes/masterRoutes');
 
-app.use('/api/auth/login', loginRateLimiter);
-app.use('/api/auth', authRoutes);
+  app.use('/api/auth/login', loginRateLimiter);
+  app.use('/api/auth', authRoutes);
 
-app.use('/api/chambers', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberRoutes);
-app.use('/api/leads', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin']), leadRoutes);
-app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin', 'do_operator']), dashboardRoutes);
-app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), tempRoutes);
-app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberTempRoutes);
-app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), inwardRoutes);
-app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), outwardRoutes);
-app.use('/api/do-operators', verifyToken, requireRole(['super_admin', 'sub_admin']), operatorRoutes);
-app.use('/api/customers', verifyToken, requireRole(['super_admin', 'sub_admin']), subAdminRoutes);
-app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), require('./routes/appSubAdminRoutes'));
-app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), activityRoutes);
-app.use('/api/permission-requests', permissionRoutes);
-app.use('/api/masters', verifyToken, requireRole(['super_admin', 'sub_admin']), masterRoutes);
-app.use(
-  '/api/customer-reports',
-  verifyToken,
-  requireRole(['customer', 'super_admin']),
-  require('./routes/customerReportRoutes')
-);
-app.use(
-  '/api/customer-notes',
-  verifyToken,
-  requireRole(['customer', 'super_admin']),
-  require('./routes/customerAdminNotesRoutes')
-);
+  app.use('/api/chambers', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberRoutes);
+  app.use('/api/leads', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin']), leadRoutes);
+  app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin', 'do_operator']), dashboardRoutes);
+  app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), tempRoutes);
+  app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberTempRoutes);
+  app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), inwardRoutes);
+  app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), outwardRoutes);
+  app.use('/api/do-operators', verifyToken, requireRole(['super_admin', 'sub_admin']), operatorRoutes);
+  app.use('/api/customers', verifyToken, requireRole(['super_admin', 'sub_admin']), subAdminRoutes);
+  app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), require('./routes/appSubAdminRoutes'));
+  app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), activityRoutes);
+  app.use('/api/permission-requests', permissionRoutes);
+  app.use('/api/masters', verifyToken, requireRole(['super_admin', 'sub_admin']), masterRoutes);
+  app.use(
+    '/api/customer-reports',
+    verifyToken,
+    requireRole(['customer', 'super_admin']),
+    require('./routes/customerReportRoutes')
+  );
+  app.use(
+    '/api/customer-notes',
+    verifyToken,
+    requireRole(['customer', 'super_admin']),
+    require('./routes/customerAdminNotesRoutes')
+  );
+} catch (routeErr) {
+  errorLine('API routes failed to load:', routeErr?.message || routeErr);
+}
 
 app.get('/api/health/db', async (_req, res) => {
   try {
@@ -380,7 +408,11 @@ app.use((req, res) => {
   });
 });
 
-app.use(require('./utils/errorHandler').globalErrorMiddleware);
+try {
+  app.use(require('./utils/errorHandler').globalErrorMiddleware);
+} catch (handlerErr) {
+  errorLine('Error handler failed to load:', handlerErr?.message || handlerErr);
+}
 
 // ------------------------------------------------------------------
 // Process-level failures + log housekeeping on startup
@@ -394,21 +426,6 @@ try {
 } catch (archiveErr) {
   errorLine('Log archive skipped:', archiveErr?.message || archiveErr);
 }
-
-process.on('uncaughtException', (err) => {
-  writeFailedProcess('uncaughtException', err, { status: 500 });
-  errorLine('uncaughtException:', err?.message || err);
-});
-
-process.on('unhandledRejection', (reason) => {
-  const err = reason instanceof Error ? reason : new Error(String(reason));
-  writeFailedProcess('unhandledRejection', err, { status: 500 });
-  errorLine('unhandledRejection:', err?.message || err);
-});
-
-let httpServer = app.listen(PORT, '0.0.0.0', () => {
-  serverRunning(PORT);
-});
 
 try {
   const db = require('./config/db');
