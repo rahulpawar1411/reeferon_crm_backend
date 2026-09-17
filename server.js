@@ -1,9 +1,39 @@
 // ====================================================================
 // Express API Server Main Entry (backend/server.js)
-// Port: 5000 | MySQL Connection Pool | Static Uploads Folder
+// Bind health + port FIRST so Railway never shows "failed to respond".
 // ====================================================================
 
+require('dotenv').config();
 const express = require('express');
+const app = express();
+const PORT = Number(process.env.PORT) || 5000;
+
+function simpleHealth(_req, res) {
+  const onRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN);
+  return res.status(200).json({
+    ok: true,
+    success: true,
+    status: 'Online',
+    backend: onRailway ? 'railway' : 'local',
+    port: PORT,
+    message: 'ReeferON API is running'
+  });
+}
+
+app.get('/api/health', simpleHealth);
+app.get('/api', simpleHealth);
+app.get('/api/', simpleHealth);
+
+let httpServer;
+try {
+  httpServer = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[SERVER] running on port ${PORT}`);
+  });
+} catch (listenErr) {
+  console.error('[SERVER] listen failed:', listenErr.message);
+  process.exit(1);
+}
+
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
@@ -17,7 +47,6 @@ const rateLimit = (() => {
     return null;
   }
 })();
-require('dotenv').config();
 
 const {
   enableQuietConsole,
@@ -27,11 +56,8 @@ const {
 } = require('./utils/quietConsole');
 const { ensureUploadFolders } = require('./utils/uploadsDir');
 
-// Quiet terminal: only server running + errors + status codes
 enableQuietConsole();
-
-const app = express();
-const PORT = process.env.PORT || 5000;
+serverRunning(PORT);
 
 // Security Header Protection (Helmet)
 app.use(helmet({
@@ -77,14 +103,6 @@ app.use(cors({
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(cookieParser());
-
-app.get('/api', sendApiHealth);
-app.get('/api/', sendApiHealth);
-app.get('/api/health', sendApiHealth);
-
-let httpServer = app.listen(PORT, '0.0.0.0', () => {
-  serverRunning(PORT);
-});
 
 // Compact HTTP status log (4xx/5xx always; all statuses if LOG_ALL_STATUS=1)
 app.use((req, res, next) => {
@@ -296,50 +314,54 @@ app.get('/api/debug-sync', async (req, res) => {
   return res.json(diagnostics);
 });
 
-const { verifyToken, requireRole } = require('./middleware/auth');
+try {
+  const { verifyToken, requireRole } = require('./middleware/auth');
 
-const authRoutes = require('./routes/authRoutes');
-const leadRoutes = require('./routes/leadRoutes');
-const dashboardRoutes = require('./routes/dashboardRoutes');
-const tempRoutes = require('./routes/tempRoutes');
-const chamberTempRoutes = require('./routes/chamberTempRoutes');
-const inwardRoutes = require('./routes/inwardRoutes');
-const outwardRoutes = require('./routes/outwardRoutes');
-const operatorRoutes = require('./routes/operatorRoutes');
-const subAdminRoutes = require('./routes/subAdminRoutes');
-const activityRoutes = require('./routes/activityRoutes');
-const permissionRoutes = require('./routes/permissionRoutes');
-const chamberRoutes = require('./routes/chamberRoutes');
-const masterRoutes = require('./routes/masterRoutes');
+  const authRoutes = require('./routes/authRoutes');
+  const leadRoutes = require('./routes/leadRoutes');
+  const dashboardRoutes = require('./routes/dashboardRoutes');
+  const tempRoutes = require('./routes/tempRoutes');
+  const chamberTempRoutes = require('./routes/chamberTempRoutes');
+  const inwardRoutes = require('./routes/inwardRoutes');
+  const outwardRoutes = require('./routes/outwardRoutes');
+  const operatorRoutes = require('./routes/operatorRoutes');
+  const subAdminRoutes = require('./routes/subAdminRoutes');
+  const activityRoutes = require('./routes/activityRoutes');
+  const permissionRoutes = require('./routes/permissionRoutes');
+  const chamberRoutes = require('./routes/chamberRoutes');
+  const masterRoutes = require('./routes/masterRoutes');
 
-app.use('/api/auth/login', loginRateLimiter);
-app.use('/api/auth', authRoutes);
+  app.use('/api/auth/login', loginRateLimiter);
+  app.use('/api/auth', authRoutes);
 
-app.use('/api/chambers', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberRoutes);
-app.use('/api/leads', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin']), leadRoutes);
-app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin', 'do_operator']), dashboardRoutes);
-app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), tempRoutes);
-app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberTempRoutes);
-app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), inwardRoutes);
-app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), outwardRoutes);
-app.use('/api/do-operators', verifyToken, requireRole(['super_admin', 'sub_admin']), operatorRoutes);
-app.use('/api/customers', verifyToken, requireRole(['super_admin', 'sub_admin']), subAdminRoutes);
-app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), require('./routes/appSubAdminRoutes'));
-app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), activityRoutes);
-app.use('/api/permission-requests', permissionRoutes);
-app.use('/api/masters', verifyToken, requireRole(['super_admin', 'sub_admin']), masterRoutes);
-app.use(
-  '/api/customer-reports',
-  verifyToken,
-  requireRole(['customer', 'super_admin']),
-  require('./routes/customerReportRoutes')
-);
-app.use(
-  '/api/customer-notes',
-  verifyToken,
-  requireRole(['customer', 'super_admin']),
-  require('./routes/customerAdminNotesRoutes')
-);
+  app.use('/api/chambers', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberRoutes);
+  app.use('/api/leads', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin']), leadRoutes);
+  app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin', 'do_operator']), dashboardRoutes);
+  app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), tempRoutes);
+  app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberTempRoutes);
+  app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), inwardRoutes);
+  app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), outwardRoutes);
+  app.use('/api/do-operators', verifyToken, requireRole(['super_admin', 'sub_admin']), operatorRoutes);
+  app.use('/api/customers', verifyToken, requireRole(['super_admin', 'sub_admin']), subAdminRoutes);
+  app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), require('./routes/appSubAdminRoutes'));
+  app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), activityRoutes);
+  app.use('/api/permission-requests', permissionRoutes);
+  app.use('/api/masters', verifyToken, requireRole(['super_admin', 'sub_admin']), masterRoutes);
+  app.use(
+    '/api/customer-reports',
+    verifyToken,
+    requireRole(['customer', 'super_admin']),
+    require('./routes/customerReportRoutes')
+  );
+  app.use(
+    '/api/customer-notes',
+    verifyToken,
+    requireRole(['customer', 'super_admin']),
+    require('./routes/customerAdminNotesRoutes')
+  );
+} catch (routeErr) {
+  errorLine('API routes failed to load (health still works):', routeErr.message);
+}
 
 function dbKindFromHost(host) {
   const h = String(host || '').toLowerCase();
@@ -399,77 +421,6 @@ function getBackendDeployInfo() {
     environment: process.env.NODE_ENV || 'development',
     publicHost: `localhost:${process.env.PORT || 5000}`
   };
-}
-
-async function sendApiHealth(req, res) {
-  // Always HTTP 200 so Railway healthcheck does not kill the service when DB is down.
-  try {
-    const db = require('./config/db');
-    const { getUploadsRoot, ensureUploadFolders } = require('./utils/uploadsDir');
-    const dbHealth = await db.getDbHealth();
-    let uploadsRoot = null;
-    let uploadsOk = false;
-    try {
-      uploadsRoot = ensureUploadFolders();
-      uploadsOk = fs.existsSync(uploadsRoot);
-    } catch (_) {
-      uploadsOk = false;
-    }
-    const ok = Boolean(dbHealth.connected);
-    const dbTarget = getDbTargetInfo();
-    const backend = getBackendDeployInfo();
-    const uptimeSeconds = Math.floor(process.uptime());
-
-    return res.status(200).json({
-      success: ok,
-      message: ok ? 'ReeferON CRM API running smoothly.' : 'API up but database unavailable.',
-      data: {
-        status: ok ? 'Online' : 'Degraded',
-        database: ok ? 'connected' : 'disconnected',
-        databaseConnected: ok,
-        databaseError: dbHealth.error || null,
-        db: {
-          connected: ok,
-          host: dbTarget.host,
-          port: dbTarget.port,
-          name: dbTarget.name,
-          kind: dbTarget.kind,
-          source: dbTarget.source,
-          error: dbHealth.error || null
-        },
-        backend: {
-          deployedOn: backend.deployedOn,
-          service: backend.service,
-          environment: backend.environment,
-          publicHost: backend.publicHost,
-          nodeEnv: process.env.NODE_ENV || 'development'
-        },
-        frontend: {
-          allowedOrigin: process.env.FRONTEND_URL || null,
-          requestOrigin: req.headers.origin || null
-        },
-        uploads: uploadsOk ? 'ready' : 'missing',
-        uploadsDir: uploadsRoot || getUploadsRoot(),
-        cloudinaryUploads: process.env.UPLOAD_TO_CLOUDINARY === 'true',
-        uptimeSeconds,
-        timestamp: new Date().toISOString(),
-        version: process.env.npm_package_version || '1.0.0'
-      }
-    });
-  } catch (err) {
-    return res.status(200).json({
-      success: false,
-      message: 'Health check failed.',
-      data: {
-        status: 'Degraded',
-        database: 'disconnected',
-        databaseConnected: false,
-        databaseError: err?.message || String(err),
-        db: { connected: false, error: err?.message || String(err) },
-        backend: getBackendDeployInfo()
-      }
-    });
-  }
 }
 
 app.use((req, res) => {
