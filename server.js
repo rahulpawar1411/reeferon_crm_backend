@@ -1,52 +1,16 @@
 // ====================================================================
 // Express API Server Main Entry (backend/server.js)
-// Bind health + port FIRST so Railway never shows "failed to respond".
+// Port: 5000 | MySQL Connection Pool | Static Uploads Folder
 // ====================================================================
 
-require('dotenv').config();
 const express = require('express');
-const app = express();
-const PORT = Number(process.env.PORT) || 5000;
-
-function simpleHealth(_req, res) {
-  const onRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN);
-  return res.status(200).json({
-    ok: true,
-    success: true,
-    status: 'Online',
-    backend: onRailway ? 'railway' : 'local',
-    port: PORT,
-    message: 'ReeferON API is running'
-  });
-}
-
-app.get('/api/health', simpleHealth);
-app.get('/api', simpleHealth);
-app.get('/api/', simpleHealth);
-
-let httpServer;
-try {
-  httpServer = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SERVER] running on port ${PORT}`);
-  });
-} catch (listenErr) {
-  console.error('[SERVER] listen failed:', listenErr.message);
-  process.exit(1);
-}
-
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
-const rateLimit = (() => {
-  try {
-    return require('express-rate-limit');
-  } catch (err) {
-    console.warn('⚠️ express-rate-limit not loaded:', err.message);
-    return null;
-  }
-})();
+const rateLimit = require('express-rate-limit');
+require('dotenv').config();
 
 const {
   enableQuietConsole,
@@ -56,8 +20,11 @@ const {
 } = require('./utils/quietConsole');
 const { ensureUploadFolders } = require('./utils/uploadsDir');
 
+// Quiet terminal: only server running + errors + status codes
 enableQuietConsole();
-serverRunning(PORT);
+
+const app = express();
+const PORT = process.env.PORT || 5000;
 
 // Security Header Protection (Helmet)
 app.use(helmet({
@@ -66,38 +33,29 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 
-// CORS — local + FRONTEND_URL + hosted Vercel/Netlify frontends
-function normalizeOrigin(url) {
-  return String(url || '').trim().replace(/\/+$/, '');
-}
-
-const allowedOrigins = ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000']
-  .map(normalizeOrigin);
+// CORS Configuration with Credentials Support (Required for HttpOnly Cookies)
+const allowedOrigins = ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000'];
 if (process.env.FRONTEND_URL) {
-  process.env.FRONTEND_URL.split(',').forEach((url) => {
-    const origin = normalizeOrigin(url);
-    if (origin) allowedOrigins.push(origin);
-  });
-}
-
-function isAllowedCorsOrigin(origin) {
-  if (!origin) return true;
-  const o = normalizeOrigin(origin);
-  if (allowedOrigins.includes(o)) return true;
-  if (/^http:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$/.test(o)) return true;
-  if (/^https:\/\/([a-z0-9-]+\.)*vercel\.app$/i.test(o)) return true;
-  if (/^https:\/\/([a-z0-9-]+\.)*netlify\.app$/i.test(o)) return true;
-  return false;
+  const origins = process.env.FRONTEND_URL.split(',').map(url => url.trim());
+  allowedOrigins.push(...origins);
 }
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (isAllowedCorsOrigin(origin)) return callback(null, true);
+    const o = String(origin || '').replace(/\/+$/, '');
+    if (
+      !origin ||
+      allowedOrigins.includes(origin) ||
+      allowedOrigins.includes(o) ||
+      /^http:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$/.test(o) ||
+      /^https:\/\/([a-z0-9-]+\.)*vercel\.app$/i.test(o) ||
+      /^https:\/\/([a-z0-9-]+\.)*netlify\.app$/i.test(o)
+    ) {
+      return callback(null, true);
+    }
     return callback(null, false);
   },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  credentials: true
 }));
 
 app.use(express.json({ limit: '20mb' }));
@@ -163,21 +121,20 @@ app.use((req, res, next) => {
 
 // Rate Limiter for Login Endpoint (Brute-force protection)
 // Skipped on local dev so wrong-password testing does not block you for 15 minutes.
-const loginRateLimiter = rateLimit
-  ? rateLimit({
-      windowMs: 15 * 60 * 1000,
-      max: 15,
-      skip: () =>
-        String(process.env.LOGIN_LOCKOUT || '').toLowerCase() !== 'true' ||
-        process.env.NODE_ENV !== 'production',
-      message: {
-        success: false,
-        message: 'Too many login attempts from this IP. Please try again after 15 minutes.'
-      },
-      standardHeaders: true,
-      legacyHeaders: false
-    })
-  : (_req, _res, next) => next();
+const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  // TEMP: skip wait unless LOGIN_LOCKOUT=true (also skipped on local)
+  skip: () =>
+    String(process.env.LOGIN_LOCKOUT || '').toLowerCase() !== 'true' ||
+    process.env.NODE_ENV !== 'production',
+  message: {
+    success: false,
+    message: 'Too many login attempts from this IP. Please try again after 15 minutes.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false
+});
 
 // Redirect static requests for Cloudinary URLs if the client prepended /
 app.use((req, res, next) => {
@@ -314,132 +271,101 @@ app.get('/api/debug-sync', async (req, res) => {
   return res.json(diagnostics);
 });
 
-try {
-  const { verifyToken, requireRole } = require('./middleware/auth');
+const { verifyToken, requireRole } = require('./middleware/auth');
 
-  const authRoutes = require('./routes/authRoutes');
-  const leadRoutes = require('./routes/leadRoutes');
-  const dashboardRoutes = require('./routes/dashboardRoutes');
-  const tempRoutes = require('./routes/tempRoutes');
-  const chamberTempRoutes = require('./routes/chamberTempRoutes');
-  const inwardRoutes = require('./routes/inwardRoutes');
-  const outwardRoutes = require('./routes/outwardRoutes');
-  const operatorRoutes = require('./routes/operatorRoutes');
-  const subAdminRoutes = require('./routes/subAdminRoutes');
-  const activityRoutes = require('./routes/activityRoutes');
-  const permissionRoutes = require('./routes/permissionRoutes');
-  const chamberRoutes = require('./routes/chamberRoutes');
-  const masterRoutes = require('./routes/masterRoutes');
+const authRoutes = require('./routes/authRoutes');
+const leadRoutes = require('./routes/leadRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
+const tempRoutes = require('./routes/tempRoutes');
+const chamberTempRoutes = require('./routes/chamberTempRoutes');
+const inwardRoutes = require('./routes/inwardRoutes');
+const outwardRoutes = require('./routes/outwardRoutes');
+const operatorRoutes = require('./routes/operatorRoutes');
+const subAdminRoutes = require('./routes/subAdminRoutes');
+const activityRoutes = require('./routes/activityRoutes');
+const permissionRoutes = require('./routes/permissionRoutes');
+const chamberRoutes = require('./routes/chamberRoutes');
+const masterRoutes = require('./routes/masterRoutes');
 
-  app.use('/api/auth/login', loginRateLimiter);
-  app.use('/api/auth', authRoutes);
+app.use('/api/auth/login', loginRateLimiter);
+app.use('/api/auth', authRoutes);
 
-  app.use('/api/chambers', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberRoutes);
-  app.use('/api/leads', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin']), leadRoutes);
-  app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin', 'do_operator']), dashboardRoutes);
-  app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), tempRoutes);
-  app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberTempRoutes);
-  app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), inwardRoutes);
-  app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), outwardRoutes);
-  app.use('/api/do-operators', verifyToken, requireRole(['super_admin', 'sub_admin']), operatorRoutes);
-  app.use('/api/customers', verifyToken, requireRole(['super_admin', 'sub_admin']), subAdminRoutes);
-  app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), require('./routes/appSubAdminRoutes'));
-  app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), activityRoutes);
-  app.use('/api/permission-requests', permissionRoutes);
-  app.use('/api/masters', verifyToken, requireRole(['super_admin', 'sub_admin']), masterRoutes);
-  app.use(
-    '/api/customer-reports',
-    verifyToken,
-    requireRole(['customer', 'super_admin']),
-    require('./routes/customerReportRoutes')
-  );
-  app.use(
-    '/api/customer-notes',
-    verifyToken,
-    requireRole(['customer', 'super_admin']),
-    require('./routes/customerAdminNotesRoutes')
-  );
-} catch (routeErr) {
-  errorLine('API routes failed to load (health still works):', routeErr.message);
-}
+app.use('/api/chambers', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberRoutes);
+app.use('/api/leads', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin']), leadRoutes);
+app.use('/api/dashboard', verifyToken, requireRole(['super_admin', 'customer', 'sub_admin', 'do_operator']), dashboardRoutes);
+app.use('/api/temp-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), tempRoutes);
+app.use('/api/chamber-temp', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), chamberTempRoutes);
+app.use('/api/inward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), inwardRoutes);
+app.use('/api/outward-logs', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), outwardRoutes);
+app.use('/api/do-operators', verifyToken, requireRole(['super_admin', 'sub_admin']), operatorRoutes);
+app.use('/api/customers', verifyToken, requireRole(['super_admin', 'sub_admin']), subAdminRoutes);
+app.use('/api/sub-admins', verifyToken, requireRole(['super_admin']), require('./routes/appSubAdminRoutes'));
+app.use('/api/operator-activities', verifyToken, requireRole(['super_admin', 'customer', 'do_operator', 'sub_admin']), activityRoutes);
+app.use('/api/permission-requests', permissionRoutes);
+app.use('/api/masters', verifyToken, requireRole(['super_admin', 'sub_admin']), masterRoutes);
+app.use(
+  '/api/customer-reports',
+  verifyToken,
+  requireRole(['customer', 'super_admin']),
+  require('./routes/customerReportRoutes')
+);
+app.use(
+  '/api/customer-notes',
+  verifyToken,
+  requireRole(['customer', 'super_admin']),
+  require('./routes/customerAdminNotesRoutes')
+);
 
-function dbKindFromHost(host) {
-  const h = String(host || '').toLowerCase();
-  if (h.includes('railway.internal')) return 'railway-internal';
-  if (h.includes('proxy.rlwy.net')) return 'railway-public';
-  if (h === 'localhost' || h === '127.0.0.1') return 'local';
-  return 'other';
-}
+app.get('/api/health', async (req, res) => {
+  const db = require('./config/db');
+  const { getUploadsRoot, ensureUploadFolders } = require('./utils/uploadsDir');
+  const dbHealth = await db.getDbHealth();
+  let uploadsRoot = null;
+  let uploadsOk = false;
+  try {
+    uploadsRoot = ensureUploadFolders();
+    uploadsOk = fs.existsSync(uploadsRoot);
+  } catch (_) {
+    uploadsOk = false;
+  }
+  const ok = dbHealth.connected;
+  const uptimeSeconds = Math.floor(process.uptime());
 
-function getDbTargetInfo() {
-  const url = process.env.DATABASE_URL;
-  if (url) {
-    try {
-      const u = new URL(url);
-      const host = u.hostname;
-      return {
-        source: 'DATABASE_URL',
-        host,
-        port: u.port || '3306',
-        name: (u.pathname || '/').replace(/^\//, '') || null,
-        kind: dbKindFromHost(host)
-      };
-    } catch (_) {
-      /* fall through */
+  return res.status(ok ? 200 : 503).json({
+    success: ok,
+    message: ok ? 'ReeferON CRM API running smoothly.' : 'API up but database unavailable.',
+    data: {
+      status: ok ? 'Online' : 'Degraded',
+      database: ok ? 'connected' : 'disconnected',
+      databaseError: dbHealth.error || null,
+      uploads: uploadsOk ? 'ready' : 'missing',
+      uploadsDir: uploadsRoot || getUploadsRoot(),
+      cloudinaryUploads: process.env.UPLOAD_TO_CLOUDINARY === 'true',
+      uptimeSeconds,
+      timestamp: new Date().toISOString(),
+      version: process.env.npm_package_version || '1.0.0'
     }
-  }
-  const host = process.env.DB_HOST || 'localhost';
-  return {
-    source: 'DB_HOST',
-    host,
-    port: String(process.env.DB_PORT || 3306),
-    name: process.env.DB_NAME || 'reeferon_crm_db',
-    kind: dbKindFromHost(host)
-  };
-}
+  });
+});
 
-function getBackendDeployInfo() {
-  if (process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_SERVICE_NAME) {
-    return {
-      deployedOn: 'railway',
-      service: process.env.RAILWAY_SERVICE_NAME || null,
-      environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || null,
-      publicHost: process.env.RAILWAY_PUBLIC_DOMAIN || null
-    };
-  }
-  if (process.env.RENDER) {
-    return {
-      deployedOn: 'render',
-      service: process.env.RENDER_SERVICE_NAME || null,
-      environment: process.env.RENDER_SERVICE_TYPE || null,
-      publicHost: process.env.RENDER_EXTERNAL_URL || null
-    };
-  }
-  return {
-    deployedOn: 'local',
-    service: null,
-    environment: process.env.NODE_ENV || 'development',
-    publicHost: `localhost:${process.env.PORT || 5000}`
-  };
-}
-
-app.use((req, res) => {
-  if (String(req.path || '').startsWith('/api')) {
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api')) {
     return res.status(404).json({
       success: false,
       message: 'API route not found',
       error: 'API route not found'
     });
   }
-
+  
   const frontendPath = path.join(__dirname, '../frontend/dist/index.html');
   if (fs.existsSync(frontendPath)) {
-    return res.sendFile(frontendPath);
+    res.sendFile(frontendPath);
+  } else {
+    res.json({
+      status: 'Online',
+      message: 'ReeferON CRM API Backend running smoothly. Frontend is served separately.'
+    });
   }
-  return res.json({
-    status: 'Online',
-    message: 'ReeferON CRM API Backend running smoothly. Frontend is served separately.'
-  });
 });
 
 app.use(require('./utils/errorHandler').globalErrorMiddleware);
@@ -449,11 +375,7 @@ app.use(require('./utils/errorHandler').globalErrorMiddleware);
 // ------------------------------------------------------------------
 const { ensureLogsDir, writeFailedProcess } = require('./utils/errorFileLogger');
 const { archiveLegacyLogs } = require('./scripts/archive-error-logs');
-try {
-  ensureLogsDir();
-} catch (logDirErr) {
-  errorLine('logs dir skipped:', logDirErr.message);
-}
+ensureLogsDir();
 try {
   const { moved } = archiveLegacyLogs();
   if (moved > 0) console.log(`📁 Archived ${moved} legacy text log file(s) → logs/archive/`);
@@ -462,32 +384,26 @@ try {
 }
 
 process.on('uncaughtException', (err) => {
-  try {
-    writeFailedProcess('uncaughtException', err, { status: 500 });
-  } catch (_) {}
+  writeFailedProcess('uncaughtException', err, { status: 500 });
   errorLine('uncaughtException:', err?.message || err);
 });
 
 process.on('unhandledRejection', (reason) => {
   const err = reason instanceof Error ? reason : new Error(String(reason));
-  try {
-    writeFailedProcess('unhandledRejection', err, { status: 500 });
-  } catch (_) {}
+  writeFailedProcess('unhandledRejection', err, { status: 500 });
   errorLine('unhandledRejection:', err?.message || err);
 });
 
-try {
-  const db = require('./config/db');
-  db.getDbHealth()
-    .then((health) => {
-      if (!health.connected) {
-        errorLine('Database not connected at startup:', health.error || 'unknown');
-      }
-    })
-    .catch((dbErr) => errorLine('Database health check failed:', dbErr.message));
-} catch (dbLoadErr) {
-  errorLine('Database module failed to load:', dbLoadErr.message);
-}
+const db = require('./config/db');
+let httpServer;
+
+httpServer = app.listen(PORT, '0.0.0.0', async () => {
+  serverRunning(PORT);
+  const health = await db.getDbHealth();
+  if (!health.connected) {
+    errorLine('Database not connected at startup:', health.error || 'unknown');
+  }
+});
 
 /** Graceful shutdown — finish in-flight requests before exit. */
 function gracefulShutdown(signal) {
