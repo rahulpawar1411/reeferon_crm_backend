@@ -49,7 +49,11 @@ let httpServer = app.listen(PORT, '0.0.0.0', () => {
 });
 
 httpServer.on('error', (err) => {
-  console.error('[ERROR] listen failed:', err?.message || err);
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`[ERROR] Port ${PORT} already in use. Stop the other backend, then run npm start again.`);
+  } else {
+    console.error('[ERROR] listen failed:', err?.message || err);
+  }
   process.exit(1);
 });
 
@@ -377,7 +381,10 @@ app.get('/api/health/db', async (_req, res) => {
       message: ok ? 'Database connected.' : 'Database unavailable.',
       data: {
         database: ok ? 'connected' : 'disconnected',
-        databaseError: dbHealth.error || null
+        databaseError: dbHealth.error || null,
+        dbHost: dbHealth.host || '',
+        dbName: dbHealth.name || '',
+        dbKind: dbHealth.kind || ''
       }
     });
   } catch (err) {

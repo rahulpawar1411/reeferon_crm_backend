@@ -20,6 +20,7 @@ function enableQuietConsole() {
     if (
       /server running/i.test(msg) ||
       /listening on/i.test(msg) ||
+      /^\[SERVER\]/.test(msg) ||
       /^\[STATUS\]/.test(msg)
     ) {
       orig.log(...args);

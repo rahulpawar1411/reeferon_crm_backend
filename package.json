@@ -4,6 +4,7 @@
   "description": "Express.js and MySQL Backend API for Reeferon CRM",
   "main": "server.js",
   "scripts": {
+    "prestart": "node scripts/free-port.js",
     "start": "node server.js",
     "dev": "node scripts/free-port.js && node server.js",
     "db:update": "node database/update_db.js",

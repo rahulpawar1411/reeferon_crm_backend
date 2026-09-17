@@ -7,24 +7,66 @@ const mysql = require('mysql2/promise');
 const dotenv = require('dotenv');
 const { backfillMasterData } = require('../utils/masterBackfill');
 
-// Load environment variables from .env file
 dotenv.config();
 
-// Create a connection pool (Reuses DB connections automatically)
-// Supports connection string (DATABASE_URL) or individual parameters
-// timezone +05:30 so "today" matches India (customer/DO local date)
-// FreeSQL free tier allows very few concurrent connections — keep pool tiny there.
-const dbHostHint = String(
-  process.env.DATABASE_URL || process.env.DB_HOST || 'localhost'
-).toLowerCase();
+function isRunningOnRailway() {
+  return Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_ENVIRONMENT_NAME);
+}
+
+/** Private Railway hostname only works inside Railway. Laptop uses DB_HOST. */
+function usableDatabaseUrl() {
+  const url = String(process.env.DATABASE_URL || '').trim();
+  if (!url) return '';
+  if (!isRunningOnRailway() && /railway\.internal/i.test(url)) {
+    console.warn(
+      '⚠️ Ignoring DATABASE_URL (mysql.railway.internal). Laptop uses DB_HOST public proxy.'
+    );
+    return '';
+  }
+  return url;
+}
+
+function describeDbTarget() {
+  const url = usableDatabaseUrl();
+  if (url) {
+    try {
+      const u = new URL(url.replace(/^mysql2?:\/\//i, 'http://'));
+      const name = (u.pathname || '/railway').replace(/^\//, '').split('?')[0] || 'railway';
+      const host = u.hostname || '';
+      const kind = /railway\.internal/i.test(host)
+        ? 'railway-internal'
+        : /proxy\.rlwy\.net/i.test(host)
+          ? 'railway-public'
+          : 'url';
+      return { host, port: u.port || '3306', name, kind };
+    } catch (_) {
+      return { host: 'DATABASE_URL', port: '', name: 'railway', kind: 'url' };
+    }
+  }
+  const host = String(process.env.DB_HOST || 'localhost');
+  const kind = /proxy\.rlwy\.net/i.test(host)
+    ? 'railway-public'
+    : /railway\.internal/i.test(host)
+      ? 'railway-internal'
+      : /localhost|127\.0\.0\.1/i.test(host)
+        ? 'wamp-local'
+        : 'custom';
+  return {
+    host,
+    port: String(process.env.DB_PORT || 3306),
+    name: process.env.DB_NAME || 'reeferon_crm_db',
+    kind
+  };
+}
+
+const dbTarget = describeDbTarget();
+const dbHostHint = `${dbTarget.host} ${usableDatabaseUrl()}`.toLowerCase();
 const isFreeSqlHost =
   dbHostHint.includes('freesqldatabase') || dbHostHint.includes('sql12.freesqldatabase');
-const isRailwayInternalHost = dbHostHint.includes('.railway.internal');
 
-if (isRailwayInternalHost) {
+if (dbTarget.kind === 'railway-internal' && !isRunningOnRailway()) {
   console.warn(
-    '⚠️ DB_HOST is mysql.railway.internal — this only works when the backend runs INSIDE Railway. ' +
-      'For local npm start, use Railway Public Networking host (*.proxy.rlwy.net) + public port, or localhost.'
+    '⚠️ mysql.railway.internal only works on Railway. Laptop must use *.proxy.rlwy.net'
   );
 }
 
@@ -43,13 +85,15 @@ const poolOptions = {
 };
 
 console.log(
-  `🗄️ MySQL pool limit=${poolOptions.connectionLimit}${isFreeSqlHost ? ' (FreeSQL safe)' : ''}`
+  `[SERVER] MySQL ${dbTarget.kind} ${dbTarget.host}:${dbTarget.port}/${dbTarget.name}` +
+    `${isFreeSqlHost ? ' (FreeSQL safe)' : ''}`
 );
 
 function createMysqlPool() {
+  const databaseUrl = usableDatabaseUrl();
   try {
-    if (process.env.DATABASE_URL) {
-      return mysql.createPool({ uri: process.env.DATABASE_URL, ...poolOptions });
+    if (databaseUrl) {
+      return mysql.createPool({ uri: databaseUrl, ...poolOptions });
     }
   } catch (urlErr) {
     console.warn('⚠️ DATABASE_URL invalid, falling back to DB_HOST:', urlErr.message);
@@ -77,7 +121,7 @@ async function testDbConnection() {
   try {
     // Use pool.query only (no held getConnection) so FreeSQL connection slots stay free
     await pool.query('SELECT 1');
-    console.log('✅ Connected to MySQL Database:', process.env.DB_NAME || (isFreeSqlHost ? 'FreeSQL' : 'reeferon_crm_db'));
+    console.log('✅ Connected to MySQL Database:', dbTarget.name, `(${dbTarget.kind})`);
 
     // Fresh DB bootstrap: core auth + inward/outward log tables (must exist before ALTER migrations)
     try {
@@ -1244,11 +1288,11 @@ async function getDbHealth() {
     await pool.query('SELECT 1');
     pool._dbConnected = true;
     pool._dbLastError = null;
-    return { connected: true };
+    return { connected: true, ...describeDbTarget() };
   } catch (error) {
     pool._dbConnected = false;
     pool._dbLastError = error.message;
-    return { connected: false, error: error.message };
+    return { connected: false, error: error.message, ...describeDbTarget() };
   }
 }
 
