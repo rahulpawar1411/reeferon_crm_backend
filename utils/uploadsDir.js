@@ -39,13 +39,23 @@ function toDbRelPath(folderName, filename) {
 }
 
 function ensureUploadFolders() {
-  const root = getUploadsRoot();
-  fs.mkdirSync(root, { recursive: true });
-  for (const folder of UPLOAD_FOLDERS) {
-    fs.mkdirSync(getUploadFolderPath(folder), { recursive: true });
-    fs.mkdirSync(getLegacyUploadFolderPath(folder), { recursive: true });
+  const tryMake = (root) => {
+    fs.mkdirSync(root, { recursive: true });
+    for (const folder of UPLOAD_FOLDERS) {
+      fs.mkdirSync(path.join(root, CRM_PREFIX, folder), { recursive: true });
+      fs.mkdirSync(path.join(root, folder), { recursive: true });
+    }
+    return root;
+  };
+
+  try {
+    return tryMake(getUploadsRoot());
+  } catch (err) {
+    const fallback = path.join(require('os').tmpdir(), 'reeferon-uploads');
+    console.warn('⚠️ UPLOADS_DIR not writable, using', fallback, '-', err.message);
+    process.env.UPLOADS_DIR = fallback;
+    return tryMake(fallback);
   }
-  return root;
 }
 
 module.exports = {

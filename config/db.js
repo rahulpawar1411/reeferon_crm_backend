@@ -46,16 +46,25 @@ console.log(
   `🗄️ MySQL pool limit=${poolOptions.connectionLimit}${isFreeSqlHost ? ' (FreeSQL safe)' : ''}`
 );
 
-const pool = process.env.DATABASE_URL
-  ? mysql.createPool({ uri: process.env.DATABASE_URL, ...poolOptions })
-  : mysql.createPool({
-      host: process.env.DB_HOST || 'localhost',
-      user: process.env.DB_USER || 'root',
-      password: process.env.DB_PASSWORD || '',
-      database: process.env.DB_NAME || 'reeferon_crm_db',
-      port: process.env.DB_PORT || 3306,
-      ...poolOptions
-    });
+function createMysqlPool() {
+  try {
+    if (process.env.DATABASE_URL) {
+      return mysql.createPool({ uri: process.env.DATABASE_URL, ...poolOptions });
+    }
+  } catch (urlErr) {
+    console.warn('⚠️ DATABASE_URL invalid, falling back to DB_HOST:', urlErr.message);
+  }
+  return mysql.createPool({
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'reeferon_crm_db',
+    port: process.env.DB_PORT || 3306,
+    ...poolOptions
+  });
+}
+
+const pool = createMysqlPool();
 
 // Ensure connections are released even if callers forget (pool.query already does)
 pool.on('connection', (connection) => {

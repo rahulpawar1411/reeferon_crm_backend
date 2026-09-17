@@ -9,7 +9,14 @@ const path = require('path');
 const fs = require('fs');
 const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
-const rateLimit = require('express-rate-limit');
+const rateLimit = (() => {
+  try {
+    return require('express-rate-limit');
+  } catch (err) {
+    console.warn('⚠️ express-rate-limit not loaded:', err.message);
+    return null;
+  }
+})();
 require('dotenv').config();
 
 const {
@@ -71,6 +78,14 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 app.use(cookieParser());
 
+app.get('/api', sendApiHealth);
+app.get('/api/', sendApiHealth);
+app.get('/api/health', sendApiHealth);
+
+let httpServer = app.listen(PORT, '0.0.0.0', () => {
+  serverRunning(PORT);
+});
+
 // Compact HTTP status log (4xx/5xx always; all statuses if LOG_ALL_STATUS=1)
 app.use((req, res, next) => {
   res.on('finish', () => {
@@ -130,20 +145,21 @@ app.use((req, res, next) => {
 
 // Rate Limiter for Login Endpoint (Brute-force protection)
 // Skipped on local dev so wrong-password testing does not block you for 15 minutes.
-const loginRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 15,
-  // TEMP: skip wait unless LOGIN_LOCKOUT=true (also skipped on local)
-  skip: () =>
-    String(process.env.LOGIN_LOCKOUT || '').toLowerCase() !== 'true' ||
-    process.env.NODE_ENV !== 'production',
-  message: {
-    success: false,
-    message: 'Too many login attempts from this IP. Please try again after 15 minutes.'
-  },
-  standardHeaders: true,
-  legacyHeaders: false
-});
+const loginRateLimiter = rateLimit
+  ? rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 15,
+      skip: () =>
+        String(process.env.LOGIN_LOCKOUT || '').toLowerCase() !== 'true' ||
+        process.env.NODE_ENV !== 'production',
+      message: {
+        success: false,
+        message: 'Too many login attempts from this IP. Please try again after 15 minutes.'
+      },
+      standardHeaders: true,
+      legacyHeaders: false
+    })
+  : (_req, _res, next) => next();
 
 // Redirect static requests for Cloudinary URLs if the client prepended /
 app.use((req, res, next) => {
@@ -156,7 +172,13 @@ app.use((req, res, next) => {
   next();
 });
 
-const uploadsRoot = ensureUploadFolders();
+let uploadsRoot;
+try {
+  uploadsRoot = ensureUploadFolders();
+} catch (uploadErr) {
+  errorLine('Uploads folder failed:', uploadErr.message);
+  uploadsRoot = path.join(__dirname, 'uploads');
+}
 app.use('/uploads', express.static(uploadsRoot, {
   fallthrough: true,
   setHeaders(res) {
@@ -450,10 +472,6 @@ async function sendApiHealth(req, res) {
   }
 }
 
-app.get('/api', sendApiHealth);
-app.get('/api/', sendApiHealth);
-app.get('/api/health', sendApiHealth);
-
 app.use((req, res) => {
   if (String(req.path || '').startsWith('/api')) {
     return res.status(404).json({
@@ -480,7 +498,11 @@ app.use(require('./utils/errorHandler').globalErrorMiddleware);
 // ------------------------------------------------------------------
 const { ensureLogsDir, writeFailedProcess } = require('./utils/errorFileLogger');
 const { archiveLegacyLogs } = require('./scripts/archive-error-logs');
-ensureLogsDir();
+try {
+  ensureLogsDir();
+} catch (logDirErr) {
+  errorLine('logs dir skipped:', logDirErr.message);
+}
 try {
   const { moved } = archiveLegacyLogs();
   if (moved > 0) console.log(`📁 Archived ${moved} legacy text log file(s) → logs/archive/`);
@@ -489,26 +511,32 @@ try {
 }
 
 process.on('uncaughtException', (err) => {
-  writeFailedProcess('uncaughtException', err, { status: 500 });
+  try {
+    writeFailedProcess('uncaughtException', err, { status: 500 });
+  } catch (_) {}
   errorLine('uncaughtException:', err?.message || err);
 });
 
 process.on('unhandledRejection', (reason) => {
   const err = reason instanceof Error ? reason : new Error(String(reason));
-  writeFailedProcess('unhandledRejection', err, { status: 500 });
+  try {
+    writeFailedProcess('unhandledRejection', err, { status: 500 });
+  } catch (_) {}
   errorLine('unhandledRejection:', err?.message || err);
 });
 
-const db = require('./config/db');
-let httpServer;
-
-httpServer = app.listen(PORT, '0.0.0.0', async () => {
-  serverRunning(PORT);
-  const health = await db.getDbHealth();
-  if (!health.connected) {
-    errorLine('Database not connected at startup:', health.error || 'unknown');
-  }
-});
+try {
+  const db = require('./config/db');
+  db.getDbHealth()
+    .then((health) => {
+      if (!health.connected) {
+        errorLine('Database not connected at startup:', health.error || 'unknown');
+      }
+    })
+    .catch((dbErr) => errorLine('Database health check failed:', dbErr.message));
+} catch (dbLoadErr) {
+  errorLine('Database module failed to load:', dbLoadErr.message);
+}
 
 /** Graceful shutdown — finish in-flight requests before exit. */
 function gracefulShutdown(signal) {
