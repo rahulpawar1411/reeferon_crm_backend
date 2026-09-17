@@ -66,7 +66,6 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.options('*', cors());
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
@@ -381,82 +380,97 @@ function getBackendDeployInfo() {
 }
 
 async function sendApiHealth(req, res) {
-  const db = require('./config/db');
-  const { getUploadsRoot, ensureUploadFolders } = require('./utils/uploadsDir');
-  const dbHealth = await db.getDbHealth();
-  let uploadsRoot = null;
-  let uploadsOk = false;
+  // Always HTTP 200 so Railway healthcheck does not kill the service when DB is down.
   try {
-    uploadsRoot = ensureUploadFolders();
-    uploadsOk = fs.existsSync(uploadsRoot);
-  } catch (_) {
-    uploadsOk = false;
-  }
-  const ok = Boolean(dbHealth.connected);
-  const dbTarget = getDbTargetInfo();
-  const backend = getBackendDeployInfo();
-  const uptimeSeconds = Math.floor(process.uptime());
-
-  return res.status(ok ? 200 : 503).json({
-    success: ok,
-    message: ok ? 'ReeferON CRM API running smoothly.' : 'API up but database unavailable.',
-    data: {
-      status: ok ? 'Online' : 'Degraded',
-      database: ok ? 'connected' : 'disconnected',
-      databaseConnected: ok,
-      databaseError: dbHealth.error || null,
-      db: {
-        connected: ok,
-        host: dbTarget.host,
-        port: dbTarget.port,
-        name: dbTarget.name,
-        kind: dbTarget.kind,
-        source: dbTarget.source,
-        error: dbHealth.error || null
-      },
-      backend: {
-        deployedOn: backend.deployedOn,
-        service: backend.service,
-        environment: backend.environment,
-        publicHost: backend.publicHost,
-        nodeEnv: process.env.NODE_ENV || 'development'
-      },
-      frontend: {
-        allowedOrigin: process.env.FRONTEND_URL || null,
-        requestOrigin: req.headers.origin || null
-      },
-      uploads: uploadsOk ? 'ready' : 'missing',
-      uploadsDir: uploadsRoot || getUploadsRoot(),
-      cloudinaryUploads: process.env.UPLOAD_TO_CLOUDINARY === 'true',
-      uptimeSeconds,
-      timestamp: new Date().toISOString(),
-      version: process.env.npm_package_version || '1.0.0'
+    const db = require('./config/db');
+    const { getUploadsRoot, ensureUploadFolders } = require('./utils/uploadsDir');
+    const dbHealth = await db.getDbHealth();
+    let uploadsRoot = null;
+    let uploadsOk = false;
+    try {
+      uploadsRoot = ensureUploadFolders();
+      uploadsOk = fs.existsSync(uploadsRoot);
+    } catch (_) {
+      uploadsOk = false;
     }
-  });
+    const ok = Boolean(dbHealth.connected);
+    const dbTarget = getDbTargetInfo();
+    const backend = getBackendDeployInfo();
+    const uptimeSeconds = Math.floor(process.uptime());
+
+    return res.status(200).json({
+      success: ok,
+      message: ok ? 'ReeferON CRM API running smoothly.' : 'API up but database unavailable.',
+      data: {
+        status: ok ? 'Online' : 'Degraded',
+        database: ok ? 'connected' : 'disconnected',
+        databaseConnected: ok,
+        databaseError: dbHealth.error || null,
+        db: {
+          connected: ok,
+          host: dbTarget.host,
+          port: dbTarget.port,
+          name: dbTarget.name,
+          kind: dbTarget.kind,
+          source: dbTarget.source,
+          error: dbHealth.error || null
+        },
+        backend: {
+          deployedOn: backend.deployedOn,
+          service: backend.service,
+          environment: backend.environment,
+          publicHost: backend.publicHost,
+          nodeEnv: process.env.NODE_ENV || 'development'
+        },
+        frontend: {
+          allowedOrigin: process.env.FRONTEND_URL || null,
+          requestOrigin: req.headers.origin || null
+        },
+        uploads: uploadsOk ? 'ready' : 'missing',
+        uploadsDir: uploadsRoot || getUploadsRoot(),
+        cloudinaryUploads: process.env.UPLOAD_TO_CLOUDINARY === 'true',
+        uptimeSeconds,
+        timestamp: new Date().toISOString(),
+        version: process.env.npm_package_version || '1.0.0'
+      }
+    });
+  } catch (err) {
+    return res.status(200).json({
+      success: false,
+      message: 'Health check failed.',
+      data: {
+        status: 'Degraded',
+        database: 'disconnected',
+        databaseConnected: false,
+        databaseError: err?.message || String(err),
+        db: { connected: false, error: err?.message || String(err) },
+        backend: getBackendDeployInfo()
+      }
+    });
+  }
 }
 
 app.get('/api', sendApiHealth);
 app.get('/api/', sendApiHealth);
 app.get('/api/health', sendApiHealth);
 
-app.get('*', (req, res) => {
-  if (req.path.startsWith('/api')) {
+app.use((req, res) => {
+  if (String(req.path || '').startsWith('/api')) {
     return res.status(404).json({
       success: false,
       message: 'API route not found',
       error: 'API route not found'
     });
   }
-  
+
   const frontendPath = path.join(__dirname, '../frontend/dist/index.html');
   if (fs.existsSync(frontendPath)) {
-    res.sendFile(frontendPath);
-  } else {
-    res.json({
-      status: 'Online',
-      message: 'ReeferON CRM API Backend running smoothly. Frontend is served separately.'
-    });
+    return res.sendFile(frontendPath);
   }
+  return res.json({
+    status: 'Online',
+    message: 'ReeferON CRM API Backend running smoothly. Frontend is served separately.'
+  });
 });
 
 app.use(require('./utils/errorHandler').globalErrorMiddleware);
