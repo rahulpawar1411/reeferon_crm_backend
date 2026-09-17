@@ -33,23 +33,40 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 
-// CORS Configuration with Credentials Support (Required for HttpOnly Cookies)
-const allowedOrigins = ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000'];
+// CORS — local + FRONTEND_URL + hosted Vercel/Netlify frontends
+function normalizeOrigin(url) {
+  return String(url || '').trim().replace(/\/+$/, '');
+}
+
+const allowedOrigins = ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000']
+  .map(normalizeOrigin);
 if (process.env.FRONTEND_URL) {
-  const origins = process.env.FRONTEND_URL.split(',').map(url => url.trim());
-  allowedOrigins.push(...origins);
+  process.env.FRONTEND_URL.split(',').forEach((url) => {
+    const origin = normalizeOrigin(url);
+    if (origin) allowedOrigins.push(origin);
+  });
+}
+
+function isAllowedCorsOrigin(origin) {
+  if (!origin) return true;
+  const o = normalizeOrigin(origin);
+  if (allowedOrigins.includes(o)) return true;
+  if (/^http:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$/.test(o)) return true;
+  if (/^https:\/\/([a-z0-9-]+\.)*vercel\.app$/i.test(o)) return true;
+  if (/^https:\/\/([a-z0-9-]+\.)*netlify\.app$/i.test(o)) return true;
+  return false;
 }
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow non-browser / same-origin / Vite LAN hosts during local dev
-    if (!origin || allowedOrigins.includes(origin) || /^http:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$/.test(origin)) {
-      return callback(null, true);
-    }
+    if (isAllowedCorsOrigin(origin)) return callback(null, true);
     return callback(null, false);
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+app.options('*', cors());
 
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
