@@ -320,7 +320,67 @@ app.use(
   require('./routes/customerAdminNotesRoutes')
 );
 
-app.get('/api/health', async (req, res) => {
+function dbKindFromHost(host) {
+  const h = String(host || '').toLowerCase();
+  if (h.includes('railway.internal')) return 'railway-internal';
+  if (h.includes('proxy.rlwy.net')) return 'railway-public';
+  if (h === 'localhost' || h === '127.0.0.1') return 'local';
+  return 'other';
+}
+
+function getDbTargetInfo() {
+  const url = process.env.DATABASE_URL;
+  if (url) {
+    try {
+      const u = new URL(url);
+      const host = u.hostname;
+      return {
+        source: 'DATABASE_URL',
+        host,
+        port: u.port || '3306',
+        name: (u.pathname || '/').replace(/^\//, '') || null,
+        kind: dbKindFromHost(host)
+      };
+    } catch (_) {
+      /* fall through */
+    }
+  }
+  const host = process.env.DB_HOST || 'localhost';
+  return {
+    source: 'DB_HOST',
+    host,
+    port: String(process.env.DB_PORT || 3306),
+    name: process.env.DB_NAME || 'reeferon_crm_db',
+    kind: dbKindFromHost(host)
+  };
+}
+
+function getBackendDeployInfo() {
+  if (process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_SERVICE_NAME) {
+    return {
+      deployedOn: 'railway',
+      service: process.env.RAILWAY_SERVICE_NAME || null,
+      environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || null,
+      publicHost: process.env.RAILWAY_PUBLIC_DOMAIN || null
+    };
+  }
+  if (process.env.RENDER) {
+    return {
+      deployedOn: 'render',
+      service: process.env.RENDER_SERVICE_NAME || null,
+      environment: process.env.RENDER_SERVICE_TYPE || null,
+      publicHost: process.env.RENDER_EXTERNAL_URL || null
+    };
+  }
+  return {
+    deployedOn: 'local',
+    service: null,
+    environment: process.env.NODE_ENV || 'development',
+    publicHost: `localhost:${process.env.PORT || 5000}`
+  };
+}
+
+async function sendApiHealth(req, res) {
   const db = require('./config/db');
   const { getUploadsRoot, ensureUploadFolders } = require('./utils/uploadsDir');
   const dbHealth = await db.getDbHealth();
@@ -332,7 +392,9 @@ app.get('/api/health', async (req, res) => {
   } catch (_) {
     uploadsOk = false;
   }
-  const ok = dbHealth.connected;
+  const ok = Boolean(dbHealth.connected);
+  const dbTarget = getDbTargetInfo();
+  const backend = getBackendDeployInfo();
   const uptimeSeconds = Math.floor(process.uptime());
 
   return res.status(ok ? 200 : 503).json({
@@ -341,7 +403,28 @@ app.get('/api/health', async (req, res) => {
     data: {
       status: ok ? 'Online' : 'Degraded',
       database: ok ? 'connected' : 'disconnected',
+      databaseConnected: ok,
       databaseError: dbHealth.error || null,
+      db: {
+        connected: ok,
+        host: dbTarget.host,
+        port: dbTarget.port,
+        name: dbTarget.name,
+        kind: dbTarget.kind,
+        source: dbTarget.source,
+        error: dbHealth.error || null
+      },
+      backend: {
+        deployedOn: backend.deployedOn,
+        service: backend.service,
+        environment: backend.environment,
+        publicHost: backend.publicHost,
+        nodeEnv: process.env.NODE_ENV || 'development'
+      },
+      frontend: {
+        allowedOrigin: process.env.FRONTEND_URL || null,
+        requestOrigin: req.headers.origin || null
+      },
       uploads: uploadsOk ? 'ready' : 'missing',
       uploadsDir: uploadsRoot || getUploadsRoot(),
       cloudinaryUploads: process.env.UPLOAD_TO_CLOUDINARY === 'true',
@@ -350,7 +433,11 @@ app.get('/api/health', async (req, res) => {
       version: process.env.npm_package_version || '1.0.0'
     }
   });
-});
+}
+
+app.get('/api', sendApiHealth);
+app.get('/api/', sendApiHealth);
+app.get('/api/health', sendApiHealth);
 
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) {
