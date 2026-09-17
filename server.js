@@ -323,54 +323,23 @@ app.use(
 );
 
 app.get('/api/health', async (req, res) => {
-  const payload = {
-    success: true,
-    message: 'ReeferON CRM API running smoothly.',
+  const db = require('./config/db');
+  const dbHealth = await db.getDbHealth();
+  const ok = dbHealth.connected;
+  const uptimeSeconds = Math.floor(process.uptime());
+
+  return res.status(ok ? 200 : 503).json({
+    success: ok,
+    message: ok ? 'ReeferON CRM API running smoothly.' : 'API up but database unavailable.',
     data: {
-      status: 'Online',
-      database: 'unknown',
-      databaseError: null,
-      uploads: 'unknown',
-      uploadsDir: null,
-      cloudinaryUploads: process.env.UPLOAD_TO_CLOUDINARY === 'true',
-      uptimeSeconds: Math.floor(process.uptime()),
+      status: ok ? 'Online' : 'Degraded',
+      database: ok ? 'connected' : 'disconnected',
+      databaseError: dbHealth.error || null,
+      uptimeSeconds,
       timestamp: new Date().toISOString(),
       version: process.env.npm_package_version || '1.0.0'
     }
-  };
-
-  try {
-    const db = require('./config/db');
-    const { getUploadsRoot, ensureUploadFolders } = require('./utils/uploadsDir');
-    const dbHealth = await Promise.race([
-      db.getDbHealth(),
-      new Promise((resolve) => setTimeout(() => resolve({ connected: false, error: 'timeout' }), 3000))
-    ]);
-    let uploadsRoot = null;
-    let uploadsOk = false;
-    try {
-      uploadsRoot = ensureUploadFolders();
-      uploadsOk = fs.existsSync(uploadsRoot);
-    } catch (_) {
-      uploadsOk = false;
-    }
-    const ok = Boolean(dbHealth.connected);
-    payload.success = ok;
-    payload.message = ok ? 'ReeferON CRM API running smoothly.' : 'API up but database unavailable.';
-    payload.data.status = ok ? 'Online' : 'Degraded';
-    payload.data.database = ok ? 'connected' : 'disconnected';
-    payload.data.databaseError = dbHealth.error || null;
-    payload.data.uploads = uploadsOk ? 'ready' : 'missing';
-    payload.data.uploadsDir = uploadsRoot || getUploadsRoot();
-  } catch (err) {
-    payload.success = false;
-    payload.message = 'API up but database unavailable.';
-    payload.data.status = 'Degraded';
-    payload.data.database = 'disconnected';
-    payload.data.databaseError = err.message || String(err);
-  }
-
-  return res.status(200).json(payload);
+  });
 });
 
 app.use((req, res) => {
