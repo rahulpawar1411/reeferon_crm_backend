@@ -1,71 +1,17 @@
 // ====================================================================
 // Express API Server Main Entry (backend/server.js)
-// Port: 5000 | MySQL Connection Pool | Static Uploads Folder
+// Bind HTTP first (Railway health), then load the rest of the app.
 // ====================================================================
 
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-const fs = require('fs');
-const helmet = require('helmet');
-const cookieParser = require('cookie-parser');
-let rateLimit = null;
-try {
-  rateLimit = require('express-rate-limit');
-} catch (err) {
-  console.warn('⚠️ express-rate-limit skipped:', err.message);
-}
 require('dotenv').config();
 
-const {
-  enableQuietConsole,
-  serverRunning,
-  statusLine,
-  errorLine
-} = require('./utils/quietConsole');
-const { ensureUploadFolders } = require('./utils/uploadsDir');
-
-// Quiet terminal: only server running + errors + status codes
-enableQuietConsole();
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
-const PORT = process.env.PORT || 5000;
-
-// Security Header Protection (Helmet)
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false,
-  crossOriginResourcePolicy: { policy: 'cross-origin' }
-}));
-
-// CORS Configuration with Credentials Support (Required for HttpOnly Cookies)
-const allowedOrigins = ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000'];
-if (process.env.FRONTEND_URL) {
-  const origins = process.env.FRONTEND_URL.split(',').map(url => url.trim());
-  allowedOrigins.push(...origins);
-}
-
-app.use(cors({
-  origin: (origin, callback) => {
-    const o = String(origin || '').replace(/\/+$/, '');
-    if (
-      !origin ||
-      allowedOrigins.includes(origin) ||
-      allowedOrigins.includes(o) ||
-      /^http:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+)(:\d+)?$/.test(o) ||
-      /^https:\/\/([a-z0-9-]+\.)*vercel\.app$/i.test(o) ||
-      /^https:\/\/([a-z0-9-]+\.)*netlify\.app$/i.test(o)
-    ) {
-      return callback(null, true);
-    }
-    return callback(null, false);
-  },
-  credentials: true
-}));
-
-app.use(express.json({ limit: '20mb' }));
-app.use(express.urlencoded({ extended: true, limit: '20mb' }));
-app.use(cookieParser());
+const isRailway = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_ENVIRONMENT_NAME);
+const PORT = Number(process.env.PORT) || 5000;
 
 function sendLiveHealth(res) {
   return res.status(200).json({
@@ -80,30 +26,87 @@ function sendLiveHealth(res) {
   });
 }
 
-// Liveness only — no DB. Register before listen so Railway never 502s on boot.
 app.get('/api/health', (_req, res) => sendLiveHealth(res));
 app.get('/health', (_req, res) => sendLiveHealth(res));
 app.get('/', (_req, res) => sendLiveHealth(res));
 
-let httpServer = app.listen(Number(PORT), '0.0.0.0', () => {
-  serverRunning(PORT);
-});
-
 process.on('uncaughtException', (err) => {
-  try {
-    errorLine('uncaughtException:', err?.message || err);
-  } catch (_) {
-    console.error('uncaughtException:', err?.message || err);
-  }
+  console.error('[ERROR] uncaughtException:', err?.message || err);
 });
 process.on('unhandledRejection', (reason) => {
   const err = reason instanceof Error ? reason : new Error(String(reason));
-  try {
-    errorLine('unhandledRejection:', err?.message || err);
-  } catch (_) {
-    console.error('unhandledRejection:', err?.message || err);
-  }
+  console.error('[ERROR] unhandledRejection:', err?.message || err);
 });
+
+if (isRailway && String(process.env.PORT || '') === '5000') {
+  console.error(
+    '[ERROR] Railway PORT is 5000. Delete the PORT variable in Railway → Variables. Railway must inject its own PORT.'
+  );
+}
+
+let httpServer = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[SERVER] listening on 0.0.0.0:${PORT}`);
+});
+
+httpServer.on('error', (err) => {
+  console.error('[ERROR] listen failed:', err?.message || err);
+  process.exit(1);
+});
+
+const cors = require('cors');
+const helmet = require('helmet');
+const cookieParser = require('cookie-parser');
+let rateLimit = null;
+try {
+  rateLimit = require('express-rate-limit');
+} catch (err) {
+  console.warn('⚠️ express-rate-limit skipped:', err.message);
+}
+
+const {
+  enableQuietConsole,
+  statusLine,
+  errorLine
+} = require('./utils/quietConsole');
+const { ensureUploadFolders } = require('./utils/uploadsDir');
+
+if (!isRailway) {
+  enableQuietConsole();
+}
+
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
+
+const allowedOrigins = ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5000'];
+if (process.env.FRONTEND_URL) {
+  const origins = process.env.FRONTEND_URL.split(',').map(url => url.trim());
+  allowedOrigins.push(...origins);
+}
+
+app.use(cors({
+  origin: (origin, callback) => {
+    const o = String(origin || '').replace(/\/+$/, '');
+    if (
+      !origin ||
+      allowedOrigins.includes(origin) ||
+      allowedOrigins.includes(o) ||
+      /^http:\/\/(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$/.test(o) ||
+      /^https:\/\/([a-z0-9-]+\.)*vercel\.app$/i.test(o) ||
+      /^https:\/\/([a-z0-9-]+\.)*netlify\.app$/i.test(o)
+    ) {
+      return callback(null, true);
+    }
+    return callback(null, false);
+  },
+  credentials: true
+}));
+
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+app.use(cookieParser());
 
 // Compact HTTP status log (4xx/5xx always; all statuses if LOG_ALL_STATUS=1)
 app.use((req, res, next) => {

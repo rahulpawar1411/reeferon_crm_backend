@@ -39,17 +39,15 @@ const uploadBuffer = (buffer, folder, publicId) => {
 };
 
 /**
- * Upload middleware — local disk is the default (Railway / self-host).
+ * Upload middleware.
  *
- * UPLOAD_TO_CLOUDINARY=true  → also push to Cloudinary; DB may get CDN URL.
- * UPLOAD_TO_CLOUDINARY=false → disk only under uploads/crm/<folder>/ (same names as Cloudinary).
- * Existing Cloudinary URLs in MySQL stay unchanged and map to those files.
+ * UPLOAD_TO_CLOUDINARY=true  → Cloudinary only; DB stores https://res.cloudinary.com/...
+ * UPLOAD_TO_CLOUDINARY=false → disk only under uploads/crm/<folder>/.
  */
 const createUploader = (folderName, filePrefix) => {
   const uploadToCloudinary = process.env.UPLOAD_TO_CLOUDINARY === 'true';
 
   if (uploadToCloudinary && process.env.CLOUDINARY_CLOUD_NAME) {
-    // Cloudinary Mode: Parse files to memory, write to local disk, and stream to Cloudinary
     const memoryMulter = multer({ storage: multer.memoryStorage() });
 
     return {
@@ -63,25 +61,9 @@ const createUploader = (folderName, filePrefix) => {
             try {
               const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
               const filename = `${filePrefix}-${fieldName}-${uniqueSuffix}`;
-              const ext = path.extname(req.file.originalname) || '.jpg';
-              const publicId = filename;
-
-              // 1. Double Save: Write buffer to local disk folder
-              const uploadDir = getUploadFolderPath(folderName);
-              if (!fs.existsSync(uploadDir)) {
-                fs.mkdirSync(uploadDir, { recursive: true });
-              }
-              const localFilePath = path.join(uploadDir, `${filename}${ext}`);
-              fs.writeFileSync(localFilePath, req.file.buffer);
-              console.log(`💾 Local Backup Saved: ${localFilePath}`);
-              req.file.localRelPath = toDbRelPath(folderName, `${filename}${ext}`);
-              req.file.filename = `${filename}${ext}`;
-
-              // 2. Upload to Cloudinary CDN
-              const result = await uploadBuffer(req.file.buffer, folderName, publicId);
-              
-              // Map the Cloudinary secure URL to req.file.path for database storage
+              const result = await uploadBuffer(req.file.buffer, folderName, filename);
               req.file.path = result.secure_url;
+              req.file.filename = filename;
               next();
             } catch (uploadErr) {
               next(uploadErr);
@@ -99,36 +81,20 @@ const createUploader = (folderName, filePrefix) => {
 
             try {
               const uploadPromises = [];
-              const uploadDir = getUploadFolderPath(folderName);
-              if (!fs.existsSync(uploadDir)) {
-                fs.mkdirSync(uploadDir, { recursive: true });
-              }
-              
               for (const fieldName of Object.keys(req.files)) {
                 const filesList = req.files[fieldName];
                 for (let i = 0; i < filesList.length; i++) {
                   const file = filesList[i];
                   const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
                   const filename = `${filePrefix}-${fieldName}-${uniqueSuffix}`;
-                  const ext = path.extname(file.originalname) || '.jpg';
-                  const publicId = filename;
-
-                  // 1. Double Save: Write buffer to local disk folder
-                  const localFilePath = path.join(uploadDir, `${filename}${ext}`);
-                  fs.writeFileSync(localFilePath, file.buffer);
-                  console.log(`💾 Local Backup Saved (Field): ${localFilePath}`);
-                  file.localRelPath = toDbRelPath(folderName, `${filename}${ext}`);
-                  file.filename = `${filename}${ext}`;
-                  
-                  // 2. Upload to Cloudinary CDN
-                  const promise = uploadBuffer(file.buffer, folderName, publicId)
-                    .then((result) => {
+                  file.filename = filename;
+                  uploadPromises.push(
+                    uploadBuffer(file.buffer, folderName, filename).then((result) => {
                       file.path = result.secure_url;
-                    });
-                  uploadPromises.push(promise);
+                    })
+                  );
                 }
               }
-
               await Promise.all(uploadPromises);
               next();
             } catch (uploadErr) {
@@ -171,9 +137,9 @@ const createUploader = (folderName, filePrefix) => {
  */
 const getSavedFilePath = (file, folderName) => {
   if (!file) return null;
-  // Prefer durable local path when dual-save wrote a disk backup — Cloudinary
-  // URLs in DB often 404 while uploads/<folder>/<file> still serves.
-  if (file.localRelPath) return file.localRelPath;
+  if (file.path && /^https?:\/\//i.test(file.path)) {
+    return file.path;
+  }
   if (file.filename) {
     const name = String(file.filename);
     if (name.includes('/') || name.startsWith('http')) {

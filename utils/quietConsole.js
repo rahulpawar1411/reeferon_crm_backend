@@ -56,7 +56,7 @@ function disableQuietConsole() {
 }
 
 function serverRunning(port) {
-  orig.log(`[SERVER] running on http://localhost:${port}`);
+  orig.log(`[SERVER] listening on 0.0.0.0:${port}`);
 }
 
 function statusLine(method, url, statusCode) {

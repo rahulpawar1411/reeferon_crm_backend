@@ -1,12 +1,10 @@
 # Railway: deploy this backend repo as a Web Service.
-# Add MySQL in the SAME project, then attach a Volume at /data/uploads.
+# Do NOT set PORT in Railway Variables — Railway injects it.
 
 [build]
 builder = "NIXPACKS"
 
 [deploy]
 startCommand = "node server.js"
-healthcheckPath = "/api/health"
-healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
