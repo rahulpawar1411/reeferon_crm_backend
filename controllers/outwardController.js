@@ -14,6 +14,7 @@ const { handleControllerError } = require('../utils/errorHandler');
 const { resolveLogAttribution } = require('../utils/logAttribution');
 const { parsePhotoCaptureMetadata, serializePhotoCaptureMetadata } = require('../utils/photoCaptureMeta');
 const { resolveWarehouseFields, resolveClientFields } = require('../utils/masterResolver');
+const { findRecentOutwardDuplicate } = require('../utils/logDedup');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -159,6 +160,29 @@ exports.addOutwardLog = async (req, res) => {
     const photo_capture_metadata = serializePhotoCaptureMetadata(
       parsePhotoCaptureMetadata(data.photo_capture_metadata)
     );
+
+    const existing = await findRecentOutwardDuplicate(db, {
+      date: data.outward_entry_date,
+      vehicle: data.outward_vehicle_no,
+      warehouse: whFields.warehouse_name,
+      client: resolvedClientName,
+      operator: logOperatorEmail,
+      dock: data.outward_dock_no,
+      seal: data.outward_seal_no,
+      reportingTime: data.outward_vehicle_reporting_time,
+      startTime: data.outward_loading_start_time,
+      invoiceQty: data.outward_invoice_qty,
+      receivedQty: data.outward_received_boxes_qty || data.outward_received_qty
+    });
+    if (existing) {
+      return res.status(200).json({
+        success: true,
+        duplicate: true,
+        id: existing.id,
+        reference_no: existing.reference_no,
+        message: 'Outward log already saved.'
+      });
+    }
 
     let startWithDate = data.outward_loading_start_time || null;
     const startTimeOnly = (() => {

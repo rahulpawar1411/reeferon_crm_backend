@@ -15,6 +15,7 @@ const { validateInwardCreate, validateInwardUpdate } = require('../validators/in
 const { resolveLogAttribution } = require('../utils/logAttribution');
 const { parsePhotoCaptureMetadata, serializePhotoCaptureMetadata } = require('../utils/photoCaptureMeta');
 const { resolveWarehouseFields, resolveClientFields } = require('../utils/masterResolver');
+const { findRecentInwardDuplicate } = require('../utils/logDedup');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -168,6 +169,29 @@ exports.addInwardLog = async (req, res) => {
     const photo_capture_metadata = serializePhotoCaptureMetadata(
       parsePhotoCaptureMetadata(data.photo_capture_metadata)
     );
+
+    const existing = await findRecentInwardDuplicate(db, {
+      date: data.inward_entry_date,
+      vehicle: data.inward_vehicle_no,
+      warehouse: whFields.warehouse_name,
+      client: resolvedClientName,
+      operator: logOperatorEmail,
+      dock: data.inward_dock_no,
+      seal: data.inward_seal_no,
+      reportingTime: data.inward_vehicle_reporting_time,
+      startTime: data.inward_unloading_start_time,
+      invoiceQty: data.inward_invoice_qty,
+      receivedQty: data.inward_received_boxes_qty || data.inward_received_qty
+    });
+    if (existing) {
+      return res.status(200).json({
+        success: true,
+        duplicate: true,
+        id: existing.id,
+        reference_no: existing.reference_no,
+        message: 'Inward log already saved.'
+      });
+    }
 
     let startWithDate = data.inward_unloading_start_time || null;
     if (data.inward_entry_date && data.inward_unloading_start_time) {
