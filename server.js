@@ -9,7 +9,12 @@ const path = require('path');
 const fs = require('fs');
 const helmet = require('helmet');
 const cookieParser = require('cookie-parser');
-const rateLimit = require('express-rate-limit');
+let rateLimit = null;
+try {
+  rateLimit = require('express-rate-limit');
+} catch (err) {
+  console.warn('⚠️ express-rate-limit skipped:', err.message);
+}
 require('dotenv').config();
 
 const {
@@ -121,20 +126,21 @@ app.use((req, res, next) => {
 
 // Rate Limiter for Login Endpoint (Brute-force protection)
 // Skipped on local dev so wrong-password testing does not block you for 15 minutes.
-const loginRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 15,
-  // TEMP: skip wait unless LOGIN_LOCKOUT=true (also skipped on local)
-  skip: () =>
-    String(process.env.LOGIN_LOCKOUT || '').toLowerCase() !== 'true' ||
-    process.env.NODE_ENV !== 'production',
-  message: {
-    success: false,
-    message: 'Too many login attempts from this IP. Please try again after 15 minutes.'
-  },
-  standardHeaders: true,
-  legacyHeaders: false
-});
+const loginRateLimiter = rateLimit
+  ? rateLimit({
+      windowMs: 15 * 60 * 1000,
+      max: 15,
+      skip: () =>
+        String(process.env.LOGIN_LOCKOUT || '').toLowerCase() !== 'true' ||
+        process.env.NODE_ENV !== 'production',
+      message: {
+        success: false,
+        message: 'Too many login attempts from this IP. Please try again after 15 minutes.'
+      },
+      standardHeaders: true,
+      legacyHeaders: false
+    })
+  : (_req, _res, next) => next();
 
 // Redirect static requests for Cloudinary URLs if the client prepended /
 app.use((req, res, next) => {
@@ -317,55 +323,73 @@ app.use(
 );
 
 app.get('/api/health', async (req, res) => {
-  const db = require('./config/db');
-  const { getUploadsRoot, ensureUploadFolders } = require('./utils/uploadsDir');
-  const dbHealth = await db.getDbHealth();
-  let uploadsRoot = null;
-  let uploadsOk = false;
-  try {
-    uploadsRoot = ensureUploadFolders();
-    uploadsOk = fs.existsSync(uploadsRoot);
-  } catch (_) {
-    uploadsOk = false;
-  }
-  const ok = dbHealth.connected;
-  const uptimeSeconds = Math.floor(process.uptime());
-
-  return res.status(ok ? 200 : 503).json({
-    success: ok,
-    message: ok ? 'ReeferON CRM API running smoothly.' : 'API up but database unavailable.',
+  const payload = {
+    success: true,
+    message: 'ReeferON CRM API running smoothly.',
     data: {
-      status: ok ? 'Online' : 'Degraded',
-      database: ok ? 'connected' : 'disconnected',
-      databaseError: dbHealth.error || null,
-      uploads: uploadsOk ? 'ready' : 'missing',
-      uploadsDir: uploadsRoot || getUploadsRoot(),
+      status: 'Online',
+      database: 'unknown',
+      databaseError: null,
+      uploads: 'unknown',
+      uploadsDir: null,
       cloudinaryUploads: process.env.UPLOAD_TO_CLOUDINARY === 'true',
-      uptimeSeconds,
+      uptimeSeconds: Math.floor(process.uptime()),
       timestamp: new Date().toISOString(),
       version: process.env.npm_package_version || '1.0.0'
     }
-  });
+  };
+
+  try {
+    const db = require('./config/db');
+    const { getUploadsRoot, ensureUploadFolders } = require('./utils/uploadsDir');
+    const dbHealth = await Promise.race([
+      db.getDbHealth(),
+      new Promise((resolve) => setTimeout(() => resolve({ connected: false, error: 'timeout' }), 3000))
+    ]);
+    let uploadsRoot = null;
+    let uploadsOk = false;
+    try {
+      uploadsRoot = ensureUploadFolders();
+      uploadsOk = fs.existsSync(uploadsRoot);
+    } catch (_) {
+      uploadsOk = false;
+    }
+    const ok = Boolean(dbHealth.connected);
+    payload.success = ok;
+    payload.message = ok ? 'ReeferON CRM API running smoothly.' : 'API up but database unavailable.';
+    payload.data.status = ok ? 'Online' : 'Degraded';
+    payload.data.database = ok ? 'connected' : 'disconnected';
+    payload.data.databaseError = dbHealth.error || null;
+    payload.data.uploads = uploadsOk ? 'ready' : 'missing';
+    payload.data.uploadsDir = uploadsRoot || getUploadsRoot();
+  } catch (err) {
+    payload.success = false;
+    payload.message = 'API up but database unavailable.';
+    payload.data.status = 'Degraded';
+    payload.data.database = 'disconnected';
+    payload.data.databaseError = err.message || String(err);
+  }
+
+  return res.status(200).json(payload);
 });
 
-app.get('*', (req, res) => {
-  if (req.path.startsWith('/api')) {
+app.use((req, res) => {
+  if (String(req.path || '').startsWith('/api')) {
     return res.status(404).json({
       success: false,
       message: 'API route not found',
       error: 'API route not found'
     });
   }
-  
+
   const frontendPath = path.join(__dirname, '../frontend/dist/index.html');
   if (fs.existsSync(frontendPath)) {
-    res.sendFile(frontendPath);
-  } else {
-    res.json({
-      status: 'Online',
-      message: 'ReeferON CRM API Backend running smoothly. Frontend is served separately.'
-    });
+    return res.sendFile(frontendPath);
   }
+  return res.json({
+    status: 'Online',
+    message: 'ReeferON CRM API Backend running smoothly. Frontend is served separately.'
+  });
 });
 
 app.use(require('./utils/errorHandler').globalErrorMiddleware);
@@ -394,16 +418,22 @@ process.on('unhandledRejection', (reason) => {
   errorLine('unhandledRejection:', err?.message || err);
 });
 
-const db = require('./config/db');
-let httpServer;
-
-httpServer = app.listen(PORT, '0.0.0.0', async () => {
+let httpServer = app.listen(PORT, '0.0.0.0', () => {
   serverRunning(PORT);
-  const health = await db.getDbHealth();
-  if (!health.connected) {
-    errorLine('Database not connected at startup:', health.error || 'unknown');
-  }
 });
+
+try {
+  const db = require('./config/db');
+  db.getDbHealth()
+    .then((health) => {
+      if (!health.connected) {
+        errorLine('Database not connected at startup:', health.error || 'unknown');
+      }
+    })
+    .catch((err) => errorLine('Database health check failed:', err.message));
+} catch (dbErr) {
+  errorLine('Database module failed to load:', dbErr.message);
+}
 
 /** Graceful shutdown — finish in-flight requests before exit. */
 function gracefulShutdown(signal) {
