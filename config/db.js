@@ -216,8 +216,11 @@ async function testDbConnection() {
           inward_client_code VARCHAR(50) DEFAULT NULL,
           operator_email VARCHAR(150) DEFAULT NULL,
           photo_capture_metadata LONGTEXT DEFAULT NULL,
+          client_submission_id VARCHAR(80) DEFAULT NULL,
+          client_submitted_at VARCHAR(40) DEFAULT NULL,
           update_details TEXT DEFAULT NULL,
           update_count INT NOT NULL DEFAULT 0,
+          UNIQUE KEY uk_inward_client_submission (client_submission_id),
           INDEX idx_inward_entry_date (inward_entry_date),
           INDEX idx_inward_client (inward_client_name),
           INDEX idx_inward_warehouse (warehouse_name),
@@ -277,8 +280,11 @@ async function testDbConnection() {
           outward_client_code VARCHAR(50) DEFAULT NULL,
           operator_email VARCHAR(150) DEFAULT NULL,
           photo_capture_metadata LONGTEXT DEFAULT NULL,
+          client_submission_id VARCHAR(80) DEFAULT NULL,
+          client_submitted_at VARCHAR(40) DEFAULT NULL,
           update_details TEXT DEFAULT NULL,
           update_count INT NOT NULL DEFAULT 0,
+          UNIQUE KEY uk_outward_client_submission (client_submission_id),
           INDEX idx_outward_entry_date (outward_entry_date),
           INDEX idx_outward_client (outward_client_name),
           INDEX idx_outward_warehouse (warehouse_name),
@@ -1155,6 +1161,25 @@ async function testDbConnection() {
         if (!colNames.includes('photo_capture_metadata')) {
           await pool.query(`ALTER TABLE ${table} ADD COLUMN photo_capture_metadata LONGTEXT DEFAULT NULL`);
           console.log(`🌱 Added photo_capture_metadata to ${table}.`);
+        }
+        if (!colNames.includes('client_submission_id')) {
+          await pool.query(`ALTER TABLE ${table} ADD COLUMN client_submission_id VARCHAR(80) DEFAULT NULL`);
+          console.log(`🌱 Added client_submission_id to ${table}.`);
+        }
+        if (!colNames.includes('client_submitted_at')) {
+          await pool.query(`ALTER TABLE ${table} ADD COLUMN client_submitted_at VARCHAR(40) DEFAULT NULL`);
+          console.log(`🌱 Added client_submitted_at to ${table}.`);
+        }
+        const submissionKey =
+          table === 'inward_temp_logs' ? 'uk_inward_client_submission' : 'uk_outward_client_submission';
+        try {
+          const [idxRows] = await pool.query(`SHOW INDEX FROM ${table} WHERE Key_name = ?`, [submissionKey]);
+          if (!idxRows.length) {
+            await pool.query(`ALTER TABLE ${table} ADD UNIQUE KEY ${submissionKey} (client_submission_id)`);
+            console.log(`🌱 Added unique ${submissionKey} on ${table}.`);
+          }
+        } catch (idxErr) {
+          console.warn(`⚠️ Unique ${submissionKey} skipped:`, idxErr.message);
         }
       } catch (colErr) {
         console.warn(`⚠️ Failed to migrate photo_capture_metadata on ${table}:`, colErr.message);

@@ -14,7 +14,7 @@ const { handleControllerError } = require('../utils/errorHandler');
 const { resolveLogAttribution } = require('../utils/logAttribution');
 const { parsePhotoCaptureMetadata, serializePhotoCaptureMetadata } = require('../utils/photoCaptureMeta');
 const { resolveWarehouseFields, resolveClientFields } = require('../utils/masterResolver');
-const { findRecentOutwardDuplicate } = require('../utils/logDedup');
+const { findRecentOutwardDuplicate, pickSubmission } = require('../utils/logDedup');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -161,18 +161,13 @@ exports.addOutwardLog = async (req, res) => {
       parsePhotoCaptureMetadata(data.photo_capture_metadata)
     );
 
+    const { submissionId, submittedAt } = pickSubmission(data);
     const existing = await findRecentOutwardDuplicate(db, {
       date: data.outward_entry_date,
       vehicle: data.outward_vehicle_no,
-      warehouse: whFields.warehouse_name,
-      client: resolvedClientName,
       operator: logOperatorEmail,
-      dock: data.outward_dock_no,
-      seal: data.outward_seal_no,
-      reportingTime: data.outward_vehicle_reporting_time,
-      startTime: data.outward_loading_start_time,
-      invoiceQty: data.outward_invoice_qty,
-      receivedQty: data.outward_received_boxes_qty || data.outward_received_qty
+      submissionId,
+      submittedAt
     });
     if (existing) {
       return res.status(200).json({
@@ -258,8 +253,9 @@ exports.addOutwardLog = async (req, res) => {
         outward_damage_received_boxes_qty, outward_material_type, outward_loading_supervisor_name, outward_remarks, 
         outward_invoice_photos, outward_pod_photo, outward_vehicle_seal_photo, outward_vehicle_temp_photo, outward_pre_vehicle_temp_photo, 
         outward_material_temp_photo, outward_vehicle_back_side_photo, outward_vehicle_back_side_photo_with_material, outward_count_sheet_photo, outward_damage_boxes_photo,
-        outward_created_at, outward_updated_at, warehouse_name, warehouse_code, outward_client_code, operator_email, photo_capture_metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        outward_created_at, outward_updated_at, warehouse_name, warehouse_code, outward_client_code, operator_email, photo_capture_metadata,
+        client_submission_id, client_submitted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const values = [
@@ -305,10 +301,35 @@ exports.addOutwardLog = async (req, res) => {
       whFields.warehouse_code,
       clFields.client_code,
       logOperatorEmail,
-      photo_capture_metadata
+      photo_capture_metadata,
+      submissionId || null,
+      submittedAt || null
     ];
 
-    const [result] = await db.query(query, values);
+    let result;
+    try {
+      [result] = await db.query(query, values);
+    } catch (insertErr) {
+      if (insertErr.code === 'ER_DUP_ENTRY' && submissionId) {
+        const dup = await findRecentOutwardDuplicate(db, {
+          submissionId,
+          submittedAt,
+          date: data.outward_entry_date,
+          vehicle: data.outward_vehicle_no,
+          operator: logOperatorEmail
+        });
+        if (dup) {
+          return res.status(200).json({
+            success: true,
+            duplicate: true,
+            id: dup.id,
+            reference_no: dup.reference_no,
+            message: 'Outward log already saved.'
+          });
+        }
+      }
+      throw insertErr;
+    }
     const insertId = result.insertId;
     const reference_no = `RF-OUT-26-${String(insertId).padStart(4, '0')}`;
     try {

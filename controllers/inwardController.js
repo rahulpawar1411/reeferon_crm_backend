@@ -15,7 +15,7 @@ const { validateInwardCreate, validateInwardUpdate } = require('../validators/in
 const { resolveLogAttribution } = require('../utils/logAttribution');
 const { parsePhotoCaptureMetadata, serializePhotoCaptureMetadata } = require('../utils/photoCaptureMeta');
 const { resolveWarehouseFields, resolveClientFields } = require('../utils/masterResolver');
-const { findRecentInwardDuplicate } = require('../utils/logDedup');
+const { findRecentInwardDuplicate, pickSubmission } = require('../utils/logDedup');
 
 // Helper to format date
 function formatDateTime(date) {
@@ -170,18 +170,13 @@ exports.addInwardLog = async (req, res) => {
       parsePhotoCaptureMetadata(data.photo_capture_metadata)
     );
 
+    const { submissionId, submittedAt } = pickSubmission(data);
     const existing = await findRecentInwardDuplicate(db, {
       date: data.inward_entry_date,
       vehicle: data.inward_vehicle_no,
-      warehouse: whFields.warehouse_name,
-      client: resolvedClientName,
       operator: logOperatorEmail,
-      dock: data.inward_dock_no,
-      seal: data.inward_seal_no,
-      reportingTime: data.inward_vehicle_reporting_time,
-      startTime: data.inward_unloading_start_time,
-      invoiceQty: data.inward_invoice_qty,
-      receivedQty: data.inward_received_boxes_qty || data.inward_received_qty
+      submissionId,
+      submittedAt
     });
     if (existing) {
       return res.status(200).json({
@@ -241,8 +236,9 @@ exports.addInwardLog = async (req, res) => {
         inward_damage_received_boxes_qty, inward_material_type, inward_unloading_supervisor_name, inward_remarks, 
         inward_invoice_photos, inward_pod_photo, inward_vehicle_seal_photo, inward_vehicle_temp_photo, 
         inward_material_temp_photo, inward_vehicle_back_side_photo, inward_vehicle_back_side_photo_with_material, inward_count_sheet_photo, inward_damage_boxes_photo,
-        inward_created_at, inward_updated_at, warehouse_name, warehouse_code, inward_client_code, operator_email, photo_capture_metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        inward_created_at, inward_updated_at, warehouse_name, warehouse_code, inward_client_code, operator_email, photo_capture_metadata,
+        client_submission_id, client_submitted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const values = [
@@ -286,10 +282,29 @@ exports.addInwardLog = async (req, res) => {
       whFields.warehouse_code,
       clFields.client_code,
       logOperatorEmail,
-      photo_capture_metadata
+      photo_capture_metadata,
+      submissionId || null,
+      submittedAt || null
     ];
 
-    const [result] = await db.query(query, values);
+    let result;
+    try {
+      [result] = await db.query(query, values);
+    } catch (insertErr) {
+      if (insertErr.code === 'ER_DUP_ENTRY' && submissionId) {
+        const dup = await findRecentInwardDuplicate(db, { submissionId, submittedAt, date: data.inward_entry_date, vehicle: data.inward_vehicle_no, operator: logOperatorEmail });
+        if (dup) {
+          return res.status(200).json({
+            success: true,
+            duplicate: true,
+            id: dup.id,
+            reference_no: dup.reference_no,
+            message: 'Inward log already saved.'
+          });
+        }
+      }
+      throw insertErr;
+    }
     const insertId = result.insertId;
     const reference_no = `RF-IN-26-${String(insertId).padStart(4, '0')}`;
     try {
