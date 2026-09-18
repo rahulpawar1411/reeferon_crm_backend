@@ -34,4 +34,7 @@ router.get('/customers', dashboardController.getPortalCustomers);
 // GET /api/dashboard/do-operators - Data Operator accounts list
 router.get('/do-operators', dashboardController.getDoOperatorsList);
 
+// GET /api/dashboard/do-operator-io-counts?email= - one DO inward/outward totals
+router.get('/do-operator-io-counts', dashboardController.getDoOperatorIoCounts);
+
 module.exports = router;

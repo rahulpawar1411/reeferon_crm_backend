@@ -59,7 +59,79 @@ exports.getOperators = async (req, res) => {
     const [rows] = await db.query(
       'SELECT id, email, full_name, phone_no, warehouse_name, warehouse_code, chamber_limit, created_at FROM do_operators ORDER BY id DESC'
     );
-    return res.json(rows);
+
+    const pad = (n) => String(n).padStart(2, '0');
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const ioByEmail = new Map();
+    try {
+      const [inTotalRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM inward_temp_logs
+         WHERE TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`
+      );
+      const [outTotalRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM outward_temp_logs
+         WHERE TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`
+      );
+      const [inTodayRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM inward_temp_logs
+         WHERE inward_entry_date = ?
+           AND TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`,
+        [todayStr]
+      );
+      const [outTodayRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM outward_temp_logs
+         WHERE outward_entry_date = ?
+           AND TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`,
+        [todayStr]
+      );
+      const bump = (email, field, n) => {
+        const key = String(email || '').trim().toLowerCase();
+        if (!key) return;
+        if (!ioByEmail.has(key)) {
+          ioByEmail.set(key, {
+            total_inward: 0,
+            total_outward: 0,
+            today_inward: 0,
+            today_outward: 0
+          });
+        }
+        ioByEmail.get(key)[field] = Number(n) || 0;
+      };
+      (inTotalRows || []).forEach((r) => bump(r.email, 'total_inward', r.c));
+      (outTotalRows || []).forEach((r) => bump(r.email, 'total_outward', r.c));
+      (inTodayRows || []).forEach((r) => bump(r.email, 'today_inward', r.c));
+      (outTodayRows || []).forEach((r) => bump(r.email, 'today_outward', r.c));
+    } catch (ioErr) {
+      console.warn('getOperators IO counts skipped:', ioErr.message);
+    }
+
+    const withCounts = (rows || []).map((row) => {
+      const emailKey = String(row.email || '').trim().toLowerCase();
+      const io = ioByEmail.get(emailKey) || {
+        total_inward: 0,
+        total_outward: 0,
+        today_inward: 0,
+        today_outward: 0
+      };
+      return {
+        ...row,
+        total_inward: io.total_inward,
+        total_outward: io.total_outward,
+        today_inward: io.today_inward,
+        today_outward: io.today_outward
+      };
+    });
+
+    return res.json(withCounts);
   } catch (err) {
     return handleControllerError(res, err, {
       checkpoint: 'getOperators',

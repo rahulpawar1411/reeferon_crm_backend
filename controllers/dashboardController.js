@@ -1500,7 +1500,11 @@ exports.getDoTaskOverview = async (req, res) => {
           evening_pending: w.evening_pending,
           assignment_count: w.assignment_count,
           submitted_today: submittedByEmail.get(emailKey) || 0,
-          status: w.status
+          status: w.status,
+          total_inward: 0,
+          total_outward: 0,
+          today_inward: 0,
+          today_outward: 0
         });
       });
       (w.clients || []).forEach((c) => {
@@ -1546,6 +1550,96 @@ exports.getDoTaskOverview = async (req, res) => {
       console.warn('DO task overview customers count skipped:', custCountErr.message);
     }
 
+    const calendarToday = toYmd(now);
+    const ioByEmail = new Map();
+    let totalInward = 0;
+    let totalOutward = 0;
+    let todayInward = 0;
+    let todayOutward = 0;
+    try {
+      const [inTotalRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM inward_temp_logs
+         WHERE TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`
+      );
+      const [outTotalRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM outward_temp_logs
+         WHERE TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`
+      );
+      const [inDayRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM inward_temp_logs
+         WHERE inward_entry_date >= ?
+           AND inward_entry_date <= ?
+           AND TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`,
+        [fromStr, toStr]
+      );
+      const [outDayRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM outward_temp_logs
+         WHERE outward_entry_date >= ?
+           AND outward_entry_date <= ?
+           AND TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`,
+        [fromStr, toStr]
+      );
+
+      // All-time totals (include blank email rows in summary only)
+      const [[inAll]] = await db.query('SELECT COUNT(*) AS c FROM inward_temp_logs');
+      const [[outAll]] = await db.query('SELECT COUNT(*) AS c FROM outward_temp_logs');
+      const [[inDayAll]] = await db.query(
+        'SELECT COUNT(*) AS c FROM inward_temp_logs WHERE inward_entry_date >= ? AND inward_entry_date <= ?',
+        [fromStr, toStr]
+      );
+      const [[outDayAll]] = await db.query(
+        'SELECT COUNT(*) AS c FROM outward_temp_logs WHERE outward_entry_date >= ? AND outward_entry_date <= ?',
+        [fromStr, toStr]
+      );
+      totalInward = Number(inAll?.c) || 0;
+      totalOutward = Number(outAll?.c) || 0;
+      todayInward = Number(inDayAll?.c) || 0;
+      todayOutward = Number(outDayAll?.c) || 0;
+
+      const bump = (email, field, n) => {
+        const key = String(email || '').trim().toLowerCase();
+        if (!key) return;
+        if (!ioByEmail.has(key)) {
+          ioByEmail.set(key, {
+            total_inward: 0,
+            total_outward: 0,
+            today_inward: 0,
+            today_outward: 0
+          });
+        }
+        ioByEmail.get(key)[field] = Number(n) || 0;
+      };
+
+      (inTotalRows || []).forEach((r) => bump(r.email, 'total_inward', r.c));
+      (outTotalRows || []).forEach((r) => bump(r.email, 'total_outward', r.c));
+      (inDayRows || []).forEach((r) => bump(r.email, 'today_inward', r.c));
+      (outDayRows || []).forEach((r) => bump(r.email, 'today_outward', r.c));
+    } catch (ioCountErr) {
+      console.warn('DO task overview inward/outward counts skipped:', ioCountErr.message);
+    }
+
+    flatOperators.forEach((op) => {
+      const emailKey = String(op.email || '').trim().toLowerCase();
+      const io = ioByEmail.get(emailKey) || {
+        total_inward: 0,
+        total_outward: 0,
+        today_inward: 0,
+        today_outward: 0
+      };
+      op.total_inward = Number(io.total_inward) || 0;
+      op.total_outward = Number(io.total_outward) || 0;
+      op.today_inward = Number(io.today_inward) || 0;
+      op.today_outward = Number(io.today_outward) || 0;
+    });
+
     const summary = warehouses.reduce(
       (acc, w) => {
         acc.warehouses += 1;
@@ -1574,7 +1668,11 @@ exports.getDoTaskOverview = async (req, res) => {
         morning_expected: 0,
         evening_completed: 0,
         evening_pending: 0,
-        evening_expected: 0
+        evening_expected: 0,
+        total_inward: totalInward,
+        total_outward: totalOutward,
+        today_inward: todayInward,
+        today_outward: todayOutward
       }
     );
 
@@ -1644,20 +1742,89 @@ exports.getDoOperatorsList = async (req, res) => {
        FROM do_operators
        ORDER BY warehouse_name ASC, full_name ASC, email ASC`
     );
-    const operators = (rows || []).map((row) => ({
-      id: row.id,
-      email: row.email || null,
-      name: row.full_name || (row.email ? String(row.email).split('@')[0] : 'DO'),
-      full_name: row.full_name || null,
-      phone_no: row.phone_no || null,
-      warehouse_name: row.warehouse_name || 'Unassigned',
-      warehouse_code: row.warehouse_code || null,
-      chamber_limit: row.chamber_limit != null ? Number(row.chamber_limit) : null,
-      created_at: row.created_at || null
-    }));
+
+    const pad = (n) => String(n).padStart(2, '0');
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const ioByEmail = new Map();
+    try {
+      const [inTotalRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM inward_temp_logs
+         WHERE TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`
+      );
+      const [outTotalRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM outward_temp_logs
+         WHERE TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`
+      );
+      const [inTodayRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM inward_temp_logs
+         WHERE inward_entry_date = ?
+           AND TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`,
+        [todayStr]
+      );
+      const [outTodayRows] = await db.query(
+        `SELECT LOWER(TRIM(IFNULL(operator_email,''))) AS email, COUNT(*) AS c
+         FROM outward_temp_logs
+         WHERE outward_entry_date = ?
+           AND TRIM(IFNULL(operator_email,'')) <> ''
+         GROUP BY LOWER(TRIM(IFNULL(operator_email,'')))`,
+        [todayStr]
+      );
+      const bump = (email, field, n) => {
+        const key = String(email || '').trim().toLowerCase();
+        if (!key) return;
+        if (!ioByEmail.has(key)) {
+          ioByEmail.set(key, {
+            total_inward: 0,
+            total_outward: 0,
+            today_inward: 0,
+            today_outward: 0
+          });
+        }
+        ioByEmail.get(key)[field] = Number(n) || 0;
+      };
+      (inTotalRows || []).forEach((r) => bump(r.email, 'total_inward', r.c));
+      (outTotalRows || []).forEach((r) => bump(r.email, 'total_outward', r.c));
+      (inTodayRows || []).forEach((r) => bump(r.email, 'today_inward', r.c));
+      (outTodayRows || []).forEach((r) => bump(r.email, 'today_outward', r.c));
+    } catch (ioErr) {
+      console.warn('DO operators list IO counts skipped:', ioErr.message);
+    }
+
+    const operators = (rows || []).map((row) => {
+      const emailKey = String(row.email || '').trim().toLowerCase();
+      const io = ioByEmail.get(emailKey) || {
+        total_inward: 0,
+        total_outward: 0,
+        today_inward: 0,
+        today_outward: 0
+      };
+      return {
+        id: row.id,
+        email: row.email || null,
+        name: row.full_name || (row.email ? String(row.email).split('@')[0] : 'DO'),
+        full_name: row.full_name || null,
+        phone_no: row.phone_no || null,
+        warehouse_name: row.warehouse_name || 'Unassigned',
+        warehouse_code: row.warehouse_code || null,
+        chamber_limit: row.chamber_limit != null ? Number(row.chamber_limit) : null,
+        created_at: row.created_at || null,
+        total_inward: io.total_inward,
+        total_outward: io.total_outward,
+        today_inward: io.today_inward,
+        today_outward: io.today_outward
+      };
+    });
     return res.status(200).json({
       success: true,
       total: operators.length,
+      today: todayStr,
       operators
     });
   } catch (error) {
@@ -1665,6 +1832,61 @@ exports.getDoOperatorsList = async (req, res) => {
       checkpoint: 'getDoOperatorsList',
       req,
       clientMessage: 'Server error while loading DO operators.'
+    });
+  }
+};
+
+/**
+ * GET /api/dashboard/do-operator-io-counts?email=
+ * Inward/outward totals + today for one Data Operator.
+ */
+exports.getDoOperatorIoCounts = async (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'email is required.' });
+    }
+    const pad = (n) => String(n).padStart(2, '0');
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+
+    const [[inTotal]] = await db.query(
+      `SELECT COUNT(*) AS c FROM inward_temp_logs
+       WHERE LOWER(TRIM(IFNULL(operator_email,''))) = ?`,
+      [email]
+    );
+    const [[outTotal]] = await db.query(
+      `SELECT COUNT(*) AS c FROM outward_temp_logs
+       WHERE LOWER(TRIM(IFNULL(operator_email,''))) = ?`,
+      [email]
+    );
+    const [[inToday]] = await db.query(
+      `SELECT COUNT(*) AS c FROM inward_temp_logs
+       WHERE LOWER(TRIM(IFNULL(operator_email,''))) = ?
+         AND inward_entry_date = ?`,
+      [email, todayStr]
+    );
+    const [[outToday]] = await db.query(
+      `SELECT COUNT(*) AS c FROM outward_temp_logs
+       WHERE LOWER(TRIM(IFNULL(operator_email,''))) = ?
+         AND outward_entry_date = ?`,
+      [email, todayStr]
+    );
+
+    return res.status(200).json({
+      success: true,
+      email,
+      today: todayStr,
+      total_inward: Number(inTotal?.c) || 0,
+      total_outward: Number(outTotal?.c) || 0,
+      today_inward: Number(inToday?.c) || 0,
+      today_outward: Number(outToday?.c) || 0
+    });
+  } catch (error) {
+    return handleControllerError(res, error, {
+      checkpoint: 'getDoOperatorIoCounts',
+      req,
+      clientMessage: 'Server error while loading DO inward/outward counts.'
     });
   }
 };
